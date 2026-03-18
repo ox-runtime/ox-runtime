@@ -1,7 +1,6 @@
 set(RUNTIME_TEST_SOURCES
     test_runtime.cpp
     ../../src/runtime.cpp
-    ../../src/driver_connection.cpp
     common.h
 )
 
@@ -14,12 +13,6 @@ endif()
 
 add_executable(runtime_tests ${RUNTIME_TEST_SOURCES})
 
-if(WIN32 AND MSVC AND CMAKE_MSVC_RUNTIME_LIBRARY)
-    set_property(TARGET runtime_tests PROPERTY
-        MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}"
-    )
-endif()
-
 target_include_directories(runtime_tests PRIVATE
     ${OPENXR_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
@@ -30,12 +23,16 @@ target_include_directories(runtime_tests PRIVATE
 target_compile_definitions(runtime_tests PRIVATE
     OX_BUILD_STATIC
     OX_RUNTIME_TESTS
+    OX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    OX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    OX_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
 target_link_libraries(runtime_tests PRIVATE
     GTest::gtest_main
-    GTest::gmock
     spdlog::spdlog
+    dylib
+    whereami
 )
 
 configure_graphics(runtime_tests)

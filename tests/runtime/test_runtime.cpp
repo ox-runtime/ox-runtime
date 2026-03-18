@@ -1,62 +1,13 @@
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <openxr/openxr.h>
 
 #include <cstdio>
 #include <cstring>
-#include <memory>
 #include <string>
-#include <vector>
 
 #include "common.h"
 
 using namespace ox::test;
-
-// Define static members of MockDriverConnection
-const ox::runtime::RuntimePropertiesResponse ox::test::MockDriverConnection::runtime_props_ = []() {
-    ox::runtime::RuntimePropertiesResponse props = {};
-    snprintf(props.runtime_name, sizeof(props.runtime_name), "%s", "ox Mock Runtime");
-    props.runtime_version_major = 1;
-    props.runtime_version_minor = 0;
-    props.runtime_version_patch = 0;
-    props.padding = 0;
-    return props;
-}();
-
-const ox::runtime::SystemPropertiesResponse ox::test::MockDriverConnection::system_props_ = []() {
-    ox::runtime::SystemPropertiesResponse props = {};
-    snprintf(props.system_name, sizeof(props.system_name), "%s", "Mock VR System");
-    props.max_swapchain_width = 2048;
-    props.max_swapchain_height = 2048;
-    props.max_layer_count = 16;
-    props.orientation_tracking = 1;
-    props.position_tracking = 1;
-    props.padding[0] = 0;
-    props.padding[1] = 0;
-    return props;
-}();
-
-const ox::runtime::ViewConfigurationsResponse ox::test::MockDriverConnection::view_configs_ = []() {
-    ox::runtime::ViewConfigurationsResponse configs = {};
-    configs.views[0].recommended_width = 1832;
-    configs.views[0].recommended_height = 1920;
-    configs.views[0].recommended_sample_count = 1;
-    configs.views[0].max_sample_count = 4;
-    configs.views[1].recommended_width = 1832;
-    configs.views[1].recommended_height = 1920;
-    configs.views[1].recommended_sample_count = 1;
-    configs.views[1].max_sample_count = 4;
-    return configs;
-}();
-
-const ox::runtime::InteractionProfilesResponse ox::test::MockDriverConnection::interaction_profiles_ = []() {
-    ox::runtime::InteractionProfilesResponse profiles = {};
-    profiles.profile_count = 1;
-    snprintf(profiles.profiles[0], sizeof(profiles.profiles[0]), "%s", "/interaction_profiles/khr/simple_controller");
-    return profiles;
-}();
-
-ox::runtime::SharedData ox::test::MockDriverConnection::shared_data_ = {};
 
 // ============================================================================
 // Instance Tests

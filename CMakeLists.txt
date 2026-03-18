@@ -1,8 +1,6 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.27)
 
-project(ox-runtime VERSION 0.1.0 LANGUAGES CXX)
-
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+project(ox-runtime VERSION 0.1.0 LANGUAGES C CXX)
 
 if(WIN32 AND MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -20,18 +18,40 @@ if(NOT TARGET spdlog::spdlog)
     FetchContent_MakeAvailable(spdlog)
 endif()
 
+if(NOT TARGET dylib)
+    include(FetchContent)
+
+    FetchContent_Declare(
+        dylib
+        GIT_REPOSITORY https://github.com/martin-olivier/dylib
+        GIT_TAG v3.0.1
+        GIT_SHALLOW true
+    )
+    FetchContent_MakeAvailable(dylib)
+endif()
+
+if(NOT TARGET whereami)
+    include(FetchContent)
+
+    FetchContent_Declare(
+        whereami
+        GIT_REPOSITORY https://github.com/gpakosz/whereami.git
+        GIT_TAG master
+        GIT_SHALLOW true
+    )
+    FetchContent_MakeAvailable(whereami)
+
+    add_library(whereami STATIC ${whereami_SOURCE_DIR}/src/whereami.c)
+    target_include_directories(whereami PUBLIC ${whereami_SOURCE_DIR}/src)
+    if(CMAKE_DL_LIBS)
+        target_link_libraries(whereami PUBLIC ${CMAKE_DL_LIBS})
+    endif()
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 enable_testing()
-
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-endif()
-
-if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
-    add_compile_definitions(NDEBUG)
-endif()
 
 if(APPLE)
     option(OX_OPENGL "Enable OpenGL graphics API support" ON)
@@ -54,7 +74,6 @@ set(OPENXR_INCLUDE_DIR ${openxr_SOURCE_DIR}/include)
 
 set(OX_RUNTIME_SOURCES
     src/runtime.cpp
-    src/driver_connection.cpp
 )
 
 if(APPLE AND OX_METAL)
@@ -105,7 +124,7 @@ target_compile_definitions(ox_runtime PRIVATE
 
 configure_graphics(ox_runtime)
 
-target_link_libraries(ox_runtime PRIVATE spdlog::spdlog)
+target_link_libraries(ox_runtime PRIVATE spdlog::spdlog dylib whereami)
 
 if(WIN32)
     target_compile_definitions(ox_runtime PRIVATE

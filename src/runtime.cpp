@@ -43,6 +43,8 @@
 #include <openxr/openxr_loader_negotiation.h>
 #include <openxr/openxr_platform.h>
 
+#include <dylib.hpp>
+
 #ifdef OX_OPENGL
 #include "graphics_opengl.hpp"
 #endif  // OX_OPENGL
@@ -55,31 +57,41 @@
 #include "graphics_metal.hpp"
 #endif  // OX_METAL
 
+#include <ox_driver.h>
 #include <spdlog/spdlog.h>
+#include <whereami.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <queue>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
-#include "driver_connection.h"
-
-using namespace ox::runtime;
-
+#ifdef OX_OPENGL
 namespace opengl = ox::client::opengl;
+#endif
+#ifdef OX_VULKAN
 namespace vulkan = ox::client::vulkan;
+#endif
 #ifdef OX_METAL
 namespace metal = ox::client::metal;
 #endif
+namespace fs = std::filesystem;
 
 // Conditional defines for static builds (disable export attributes)
 // Note: XRAPI_ATTR and XRAPI_CALL are already defined by OpenXR headers
@@ -102,30 +114,261 @@ enum class GraphicsAPI { OpenGL, Vulkan, Metal };
 #define RUNTIME_EXPORT __attribute__((visibility("default")))
 #endif
 
-// Global driver connection - can be overridden by tests
-#ifdef OX_BUILD_STATIC
-static IDriverConnection* g_driver = nullptr;
+namespace {
+
+constexpr uint32_t kStereoViewCount = 2;
+constexpr uint32_t kMaxInteractionProfiles = 8;
+constexpr uint32_t kRuntimeMaxLayerCount = XR_MIN_COMPOSITION_LAYERS_SUPPORTED;
+constexpr uint32_t kRuntimeMaxSwapchainSampleCount = 1;
+constexpr uint32_t kRuntimeRecommendedSwapchainSampleCount = 1;
+constexpr XrDuration kDefaultDisplayPeriodNanos = 11111111;
+constexpr char kDefaultInteractionProfile[] = "/interaction_profiles/khr/simple_controller";
+#ifdef OX_VERSION_MAJOR
+constexpr uint32_t kRuntimeVersionMajor = OX_VERSION_MAJOR;
 #else
-static IDriverConnection* g_driver = &DriverConnection::Instance();
+constexpr uint32_t kRuntimeVersionMajor = 0;
+#endif
+#ifdef OX_VERSION_MINOR
+constexpr uint32_t kRuntimeVersionMinor = OX_VERSION_MINOR;
+#else
+constexpr uint32_t kRuntimeVersionMinor = 0;
+#endif
+#ifdef OX_VERSION_PATCH
+constexpr uint32_t kRuntimeVersionPatch = OX_VERSION_PATCH;
+#else
+constexpr uint32_t kRuntimeVersionPatch = 0;
 #endif
 
-// For testing: Allow injection of a mock driver connection
-// Note: This must be called before creating any OpenXR instances
-extern "C" {
-RUNTIME_EXPORT void oxSetDriver(IDriverConnection* driver) { g_driver = driver; }
-}
-
-// Instance handle management
-static std::unordered_map<XrInstance, bool> g_instances;
-static std::unordered_map<XrSession, XrInstance> g_sessions;
-static std::unordered_map<XrSpace, XrSession> g_spaces;
-
-// Session graphics binding data
 struct SessionGraphicsBinding {
-    void* bindingData = nullptr;  // Opaque pointer to API-specific binding data
+    void* bindingData = nullptr;
     GraphicsAPI graphicsAPI = GraphicsAPI::OpenGL;
 };
-static std::unordered_map<XrSession, SessionGraphicsBinding> g_session_graphics;
+
+struct SessionData {
+    XrInstance instance = XR_NULL_HANDLE;
+    XrSessionState state = XR_SESSION_STATE_IDLE;
+    XrTime last_predicted_display_time = 0;
+    XrDuration predicted_display_period = kDefaultDisplayPeriodNanos;
+    SessionGraphicsBinding graphics;
+    bool has_graphics_binding = false;
+};
+
+struct QueuedSessionStateEvent {
+    XrSession session = XR_NULL_HANDLE;
+    XrSessionState state = XR_SESSION_STATE_UNKNOWN;
+    XrTime timestamp = 0;
+};
+
+struct DeviceSnapshot {
+    std::array<OxDeviceState, OX_MAX_DEVICES> devices{};
+    uint32_t count = 0;
+};
+
+std::unique_ptr<OxDriverCallbacks> g_driver;
+std::unique_ptr<dylib::library> g_driver_library;
+std::queue<QueuedSessionStateEvent> g_session_events;
+std::mutex g_instance_mutex;
+std::atomic<uint64_t> g_next_handle{1};
+
+int64_t NowNanos() {
+    const auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+}
+
+template <typename HandleType>
+HandleType AllocateRuntimeHandle() {
+    return reinterpret_cast<HandleType>(g_next_handle.fetch_add(1, std::memory_order_relaxed));
+}
+
+void UnloadDriver() {
+    if (g_driver && g_driver->shutdown) {
+        g_driver->shutdown();
+    }
+
+    g_driver.reset();
+    g_driver_library.reset();
+}
+
+constexpr std::string_view kSimulatorDriverName = "drivers/ox-simulator/ox_driver";
+constexpr std::string_view kFrontendDriverName = "ox_ipc_frontend";
+
+fs::path ModuleDirectory() {
+    const int module_path_length = wai_getModulePath(nullptr, 0, nullptr);
+    if (module_path_length <= 0) {
+        return fs::current_path();
+    }
+
+    std::string module_path(static_cast<size_t>(module_path_length) + 1, '\0');
+    if (wai_getModulePath(module_path.data(), module_path_length, nullptr) != module_path_length) {
+        return fs::current_path();
+    }
+
+    module_path[static_cast<size_t>(module_path_length)] = '\0';
+    return fs::path(module_path.c_str()).parent_path();
+}
+
+fs::path NormalizeLibraryPath(const std::string& configured_path) {
+    fs::path path(configured_path);
+    if (path.is_relative()) {
+        path = ModuleDirectory() / path;
+    }
+    return fs::absolute(path);
+}
+
+std::string GetEnvironmentValue(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    size_t value_size = 0;
+    if (_dupenv_s(&value, &value_size, name) != 0 || value == nullptr) {
+        return {};
+    }
+
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+std::string ResolveDriverLibraryName() {
+    const std::string configured_path = GetEnvironmentValue("OX_RUNTIME_DRIVER");
+    if (!configured_path.empty()) {
+        return NormalizeLibraryPath(configured_path).string();
+    }
+
+    const std::string use_simulator = GetEnvironmentValue("OX_USE_SIMULATOR");
+    if (use_simulator == "1") {
+        return (ModuleDirectory() / kSimulatorDriverName).string();
+    }
+
+    return (ModuleDirectory() / kFrontendDriverName).string();
+}
+
+OxSessionState ToOxSessionState(XrSessionState state) {
+    return static_cast<OxSessionState>(static_cast<uint32_t>(state));
+}
+
+XrDuration ComputeDisplayPeriodNanos(float refresh_rate_hz) {
+    if (refresh_rate_hz <= 0.0f) {
+        return kDefaultDisplayPeriodNanos;
+    }
+
+    return static_cast<XrDuration>(1000000000.0 / static_cast<double>(refresh_rate_hz));
+}
+
+bool InstallDriver(OxDriverCallbacks callbacks, std::unique_ptr<dylib::library> library) {
+    if (!callbacks.initialize || !callbacks.is_device_connected || !callbacks.get_device_info ||
+        !callbacks.get_display_properties || !callbacks.get_tracking_capabilities || !callbacks.update_view_pose) {
+        spdlog::error("Driver missing required callbacks");
+        return false;
+    }
+
+    if (!callbacks.initialize()) {
+        spdlog::error("Driver initialize() failed");
+        return false;
+    }
+
+    UnloadDriver();
+    g_driver_library = std::move(library);
+    g_driver = std::make_unique<OxDriverCallbacks>(callbacks);
+    return true;
+}
+
+bool LoadDriverLibrary(const std::string& library_name) {
+    try {
+        auto library = std::make_unique<dylib::library>(library_name, dylib::decorations::os_default());
+        auto register_driver = library->get_function<int(OxDriverCallbacks*)>("ox_driver_register");
+
+        OxDriverCallbacks callbacks{};
+        if (!register_driver || !register_driver(&callbacks)) {
+            spdlog::error("Driver registration failed for {}", library_name);
+            return false;
+        }
+
+        if (!InstallDriver(callbacks, std::move(library))) {
+            return false;
+        }
+
+        spdlog::info("Loaded runtime driver");
+        return true;
+    } catch (const dylib::exception& e) {
+        spdlog::error("Failed to load driver library {}: {}", library_name, e.what());
+        return false;
+    } catch (const std::exception& e) {
+        spdlog::error("Unexpected error loading driver library {}: {}", library_name, e.what());
+        return false;
+    }
+}
+
+bool EnsureDriverLoaded() {
+    if (g_driver) {
+        return true;
+    }
+
+    return LoadDriverLibrary(ResolveDriverLibraryName());
+}
+
+std::vector<std::string> GetInteractionProfiles() {
+    std::vector<std::string> profiles;
+
+    if (g_driver && g_driver->get_interaction_profiles) {
+        const char* raw_profiles[kMaxInteractionProfiles] = {};
+        const uint32_t profile_count = std::min<uint32_t>(
+            g_driver->get_interaction_profiles(raw_profiles, kMaxInteractionProfiles), kMaxInteractionProfiles);
+        for (uint32_t index = 0; index < profile_count; ++index) {
+            if (raw_profiles[index] && raw_profiles[index][0] != '\0') {
+                profiles.emplace_back(raw_profiles[index]);
+            }
+        }
+    }
+
+    if (profiles.empty()) {
+        profiles.emplace_back(kDefaultInteractionProfile);
+    }
+
+    return profiles;
+}
+
+DeviceSnapshot CaptureDevices(int64_t predicted_time) {
+    DeviceSnapshot snapshot;
+    if (!g_driver || !g_driver->update_devices) {
+        return snapshot;
+    }
+
+    g_driver->update_devices(predicted_time, snapshot.devices.data(), &snapshot.count);
+    snapshot.count = std::min<uint32_t>(snapshot.count, OX_MAX_DEVICES);
+    return snapshot;
+}
+
+void QueueSessionStateChangeLocked(XrSession session, XrSessionState state) {
+    g_session_events.push({session, state, NowNanos()});
+}
+
+void NotifyDriverSessionState(XrSessionState state) {
+    if (g_driver && g_driver->on_session_state_changed) {
+        g_driver->on_session_state_changed(ToOxSessionState(state));
+    }
+}
+
+}  // namespace
+
+extern "C" {
+RUNTIME_EXPORT void oxSetDriverCallbacks(const OxDriverCallbacks* callbacks) {
+    if (!callbacks) {
+        UnloadDriver();
+        return;
+    }
+
+    if (!InstallDriver(*callbacks, nullptr)) {
+        spdlog::error("Failed to install injected driver callbacks");
+        return;
+    }
+
+    spdlog::info("Installed runtime driver");
+}
+}
 
 // Swapchain image data
 struct SwapchainData {
@@ -147,22 +390,18 @@ struct SwapchainData {
     int64_t format;
     GraphicsAPI graphicsAPI;  // Track which graphics API this swapchain uses
 };
-static std::unordered_map<XrSwapchain, SwapchainData> g_swapchains;
-static std::array<std::vector<std::byte>, 2> g_submit_buffers;
 
 // Action space metadata
 struct ActionSpaceData {
     XrAction action;
     XrPath subaction_path;
 };
-static std::unordered_map<XrSpace, ActionSpaceData> g_action_spaces;
 
 // Reference space metadata
 struct ReferenceSpaceData {
     XrReferenceSpaceType type;
     XrPosef pose_in_reference_space;
 };
-static std::unordered_map<XrSpace, ReferenceSpaceData> g_reference_spaces;
 
 // Action metadata
 struct ActionData {
@@ -171,15 +410,8 @@ struct ActionData {
     std::string name;
     std::vector<XrPath> subaction_paths;
 };
-static std::unordered_map<XrAction, ActionData> g_actions;
 
 // Path tracking - bidirectional mapping between paths and strings
-static std::unordered_map<XrPath, std::string> g_path_to_string;
-static std::unordered_map<std::string, XrPath> g_string_to_path;
-
-// Device path mapping (user path -> device index in shared memory)
-static std::unordered_map<std::string, int> g_device_path_to_index;
-static bool g_device_map_built = false;
 
 // Action binding metadata - maps action to its bindings
 struct ActionBinding {
@@ -187,14 +419,27 @@ struct ActionBinding {
     XrPath subaction_path;         // Which hand (left/right) or XR_NULL_PATH for no subaction
     std::vector<XrPath> profiles;  // List of profiles that use this binding
 };
-// Map from action handle to list of its bindings
-static std::unordered_map<XrAction, std::vector<ActionBinding>> g_action_bindings;
 
-// Interaction profile tracking
+static std::unordered_map<XrInstance, bool> g_instances;
+static std::unordered_map<XrSession, SessionData> g_sessions;
+static std::unordered_map<XrSpace, XrSession> g_spaces;
+static std::unordered_map<XrSwapchain, SwapchainData> g_swapchains;
+static std::array<std::vector<std::byte>, 2> g_submit_buffers;
+static std::unordered_map<XrSpace, ActionSpaceData> g_action_spaces;
+static std::unordered_map<XrSpace, ReferenceSpaceData> g_reference_spaces;
+static std::unordered_map<XrAction, ActionData> g_actions;
+static std::unordered_map<XrPath, std::string> g_path_to_string;
+static std::unordered_map<std::string, XrPath> g_string_to_path;
+static std::unordered_map<XrAction, std::vector<ActionBinding>> g_action_bindings;
 static XrPath g_current_interaction_profile = XR_NULL_PATH;
 static std::vector<std::string> g_suggested_profiles;
 
-static std::mutex g_instance_mutex;
+namespace {
+std::string PathToStringLocked(XrPath path) {
+    auto it = g_path_to_string.find(path);
+    return it != g_path_to_string.end() ? it->second : std::string();
+}
+}  // namespace
 
 // Safe string copy helper - modern C++17+ replacement for strncpy
 inline void safe_copy_string(char* dest, size_t dest_size, std::string_view src) {
@@ -202,30 +447,6 @@ inline void safe_copy_string(char* dest, size_t dest_size, std::string_view src)
     const size_t copy_len = std::min(src.size(), dest_size - 1);
     std::copy_n(src.data(), copy_len, dest);
     dest[copy_len] = '\0';
-}
-
-// Helper: Build device path mapping from shared memory
-inline void BuildDeviceMap() {
-    if (g_device_map_built) {
-        return;
-    }
-
-    auto* shared_data = g_driver->GetSharedData();
-    if (!shared_data) {
-        return;
-    }
-
-    g_device_path_to_index.clear();
-    uint32_t device_count = shared_data->frame_state.device_count.load(std::memory_order_acquire);
-
-    for (uint32_t i = 0; i < device_count && i < MAX_TRACKED_DEVICES; i++) {
-        std::string user_path(shared_data->frame_state.device_poses[i].user_path);
-        if (!user_path.empty()) {
-            g_device_path_to_index[user_path] = i;
-        }
-    }
-
-    g_device_map_built = true;
 }
 
 // Helper: Extract user path from full binding path
@@ -253,23 +474,13 @@ inline std::string ExtractComponentPath(const std::string& full_path) {
     return full_path;
 }
 
-// Helper: Find device index from user path
-inline int FindDeviceIndex(const std::string& user_path) {
-    BuildDeviceMap();
-    auto it = g_device_path_to_index.find(user_path);
-    if (it != g_device_path_to_index.end()) {
-        return it->second;
-    }
-    return -1;
-}
-
 // Helper: Get instance from session
 inline XrResult GetInstanceFromSession(XrSession session, XrInstance* instance) {
     auto session_it = g_sessions.find(session);
     if (session_it == g_sessions.end()) {
         return XR_ERROR_HANDLE_INVALID;
     }
-    *instance = session_it->second;
+    *instance = session_it->second.instance;
     return XR_SUCCESS;
 }
 
@@ -305,53 +516,84 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    std::lock_guard<std::mutex> lock(g_instance_mutex);
-
-    XrInstance instance;
-    XrResult result = GetInstanceFromSession(session, &instance);
-    if (result != XR_SUCCESS) {
-        return result;
+    assert(g_driver);
+    if (!g_driver) {
+        return XR_ERROR_RUNTIME_FAILURE;
     }
 
-    auto action_it = g_actions.find(getInfo->action);
-    if (action_it == g_actions.end()) {
-        return XR_SUCCESS;
+    std::vector<ActionBinding> bindings;
+    XrTime predicted_time = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+
+        auto session_it = g_sessions.find(session);
+        if (session_it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+
+        auto action_it = g_actions.find(getInfo->action);
+        if (action_it == g_actions.end()) {
+            return XR_SUCCESS;
+        }
+
+        auto bindings_it = g_action_bindings.find(getInfo->action);
+        if (bindings_it == g_action_bindings.end()) {
+            return XR_SUCCESS;
+        }
+
+        bindings = bindings_it->second;
+        predicted_time = session_it->second.last_predicted_display_time;
     }
 
-    // Look up bindings for this specific action
-    auto bindings_it = g_action_bindings.find(getInfo->action);
-    if (bindings_it == g_action_bindings.end()) {
-        // No bindings for this action
-        return XR_SUCCESS;
-    }
-
-    // Check each binding for this action
-    for (const auto& binding : bindings_it->second) {
+    for (const auto& binding : bindings) {
         if (!IsBindingMatch(binding, getInfo->subactionPath)) {
             continue;
         }
 
-        char binding_path_str[256];
-        uint32_t len = 0;
-        xrPathToString(instance, binding.binding_path, sizeof(binding_path_str), &len, binding_path_str);
+        std::string path_str;
+        {
+            std::lock_guard<std::mutex> lock(g_instance_mutex);
+            path_str = PathToStringLocked(binding.binding_path);
+        }
+        if (path_str.empty()) {
+            continue;
+        }
 
-        std::string path_str(binding_path_str);
         std::string user_path = ExtractUserPath(path_str);
         std::string component_path = ExtractComponentPath(path_str);
 
         auto value = state->currentState;
-        auto result = XR_FALSE;
+        bool available = false;
         if constexpr (std::is_same_v<StateType, XrActionStateBoolean>) {
-            result = g_driver->GetInputStateBoolean(user_path.c_str(), component_path.c_str(), 0, value);
+            if (!g_driver->get_input_state_boolean) {
+                continue;
+            }
+
+            uint32_t boolean_value = value ? 1u : 0u;
+            available = g_driver->get_input_state_boolean(predicted_time, user_path.c_str(), component_path.c_str(),
+                                                          &boolean_value) == OX_COMPONENT_AVAILABLE;
+            value = boolean_value ? XR_TRUE : XR_FALSE;
         } else if constexpr (std::is_same_v<StateType, XrActionStateFloat>) {
-            result = g_driver->GetInputStateFloat(user_path.c_str(), component_path.c_str(), 0, value);
+            if (!g_driver->get_input_state_float) {
+                continue;
+            }
+
+            available = g_driver->get_input_state_float(predicted_time, user_path.c_str(), component_path.c_str(),
+                                                        &value) == OX_COMPONENT_AVAILABLE;
         } else if constexpr (std::is_same_v<StateType, XrActionStateVector2f>) {
-            result = g_driver->GetInputStateVector2f(user_path.c_str(), component_path.c_str(), 0, value);
+            if (!g_driver->get_input_state_vector2f) {
+                continue;
+            }
+
+            OxVector2f vector_value{value.x, value.y};
+            available = g_driver->get_input_state_vector2f(predicted_time, user_path.c_str(), component_path.c_str(),
+                                                           &vector_value) == OX_COMPONENT_AVAILABLE;
+            value = {vector_value.x, vector_value.y};
         } else {
             return XR_ERROR_VALIDATION_FAILURE;
         }
-        if (result) {
-            // return the first matching binding, for now
+        if (available) {
             state->currentState = value;
             state->isActive = XR_TRUE;
             return XR_SUCCESS;
@@ -442,21 +684,13 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateInstance(const XrInstanceCreateInfo* crea
         InitializeFunctionMap();
     }
 
-    // Connect to service
-    if (!g_driver->Connect()) {
-        spdlog::error("Failed to connect to driver");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-
-    // Create instance handle
     std::lock_guard<std::mutex> lock(g_instance_mutex);
-    uint64_t handle = g_driver->AllocateHandle(HandleType::INSTANCE);
-    if (handle == 0) {
-        spdlog::error("Failed to allocate instance handle from runtime driver");
+    if (!g_driver) {
+        spdlog::error("Failed to load runtime driver");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
-    XrInstance newInstance = reinterpret_cast<XrInstance>(handle);
+    XrInstance newInstance = AllocateRuntimeHandle<XrInstance>();
     g_instances[newInstance] = true;
     *instance = newInstance;
 
@@ -476,9 +710,10 @@ XRAPI_ATTR XrResult XRAPI_CALL xrDestroyInstance(XrInstance instance) {
 
     g_instances.erase(it);
 
-    // Disconnect from driver if no more instances
     if (g_instances.empty()) {
-        g_driver->Disconnect();
+        while (!g_session_events.empty()) {
+            g_session_events.pop();
+        }
     }
 
     spdlog::info("OpenXR instance destroyed");
@@ -499,12 +734,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProperties(XrInstance instance, XrIn
         return XR_ERROR_HANDLE_INVALID;
     }
 
-    // Get runtime properties from cached metadata
-    auto& props = g_driver->GetRuntimeProperties();
-    XrVersion version =
-        XR_MAKE_VERSION(props.runtime_version_major, props.runtime_version_minor, props.runtime_version_patch);
-    instanceProperties->runtimeVersion = version;
-    safe_copy_string(instanceProperties->runtimeName, XR_MAX_RUNTIME_NAME_SIZE, props.runtime_name);
+    instanceProperties->runtimeVersion =
+        XR_MAKE_VERSION(kRuntimeVersionMajor, kRuntimeVersionMinor, kRuntimeVersionPatch);
+    safe_copy_string(instanceProperties->runtimeName, XR_MAX_RUNTIME_NAME_SIZE, "ox-runtime");
 
     return XR_SUCCESS;
 }
@@ -516,17 +748,23 @@ XRAPI_ATTR XrResult XRAPI_CALL xrPollEvent(XrInstance instance, XrEventDataBuffe
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    // Get next event from service
-    SessionStateEvent service_event;
-    if (g_driver->GetNextEvent(service_event)) {
+    std::lock_guard<std::mutex> lock(g_instance_mutex);
+    if (g_instances.find(instance) == g_instances.end()) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    if (!g_session_events.empty()) {
+        const QueuedSessionStateEvent service_event = g_session_events.front();
+        g_session_events.pop();
+
         XrEventDataSessionStateChanged* stateEvent = reinterpret_cast<XrEventDataSessionStateChanged*>(eventData);
         stateEvent->type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED;
         stateEvent->next = nullptr;
-        stateEvent->session = reinterpret_cast<XrSession>(service_event.session_handle);
+        stateEvent->session = service_event.session;
         stateEvent->time = service_event.timestamp;
         stateEvent->state = service_event.state;
 
-        spdlog::info("Session state event from driver connection");
+        spdlog::info("Session state event queued by runtime");
         return XR_SUCCESS;
     }
 
@@ -685,6 +923,12 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetSystem(XrInstance instance, const XrSystemGe
     if (!getInfo || !systemId) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+
+    std::lock_guard<std::mutex> lock(g_instance_mutex);
+    if (g_instances.find(instance) == g_instances.end()) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
     *systemId = 1;
     return XR_SUCCESS;
 }
@@ -696,15 +940,27 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetSystemProperties(XrInstance instance, XrSyst
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    // Get system properties from cached metadata
-    auto& sys_props = g_driver->GetSystemProperties();
+    std::lock_guard<std::mutex> lock(g_instance_mutex);
+    if (g_instances.find(instance) == g_instances.end()) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    OxDeviceInfo device_info{};
+    OxDisplayProperties display_props{};
+    OxTrackingCapabilities tracking_caps{};
+    g_driver->get_device_info(&device_info);
+    g_driver->get_display_properties(&display_props);
+    g_driver->get_tracking_capabilities(&tracking_caps);
+
     properties->systemId = systemId;
-    safe_copy_string(properties->systemName, XR_MAX_SYSTEM_NAME_SIZE, sys_props.system_name);
-    properties->graphicsProperties.maxSwapchainImageWidth = sys_props.max_swapchain_width;
-    properties->graphicsProperties.maxSwapchainImageHeight = sys_props.max_swapchain_height;
-    properties->graphicsProperties.maxLayerCount = sys_props.max_layer_count;
-    properties->trackingProperties.orientationTracking = sys_props.orientation_tracking;
-    properties->trackingProperties.positionTracking = sys_props.position_tracking;
+    safe_copy_string(properties->systemName, XR_MAX_SYSTEM_NAME_SIZE, device_info.name);
+    properties->graphicsProperties.maxSwapchainImageWidth =
+        std::max(display_props.display_width, display_props.recommended_width);
+    properties->graphicsProperties.maxSwapchainImageHeight =
+        std::max(display_props.display_height, display_props.recommended_height);
+    properties->graphicsProperties.maxLayerCount = kRuntimeMaxLayerCount;
+    properties->trackingProperties.orientationTracking = tracking_caps.has_orientation_tracking;
+    properties->trackingProperties.positionTracking = tracking_caps.has_position_tracking;
 
     return XR_SUCCESS;
 }
@@ -752,19 +1008,24 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateViewConfigurationViews(XrInstance inst
     }
 
     if (viewCapacityInput > 0 && views) {
-        // Get view configurations from cached metadata
-        auto& view_configs = g_driver->GetViewConfigurations();
+        {
+            std::lock_guard<std::mutex> lock(g_instance_mutex);
+            if (g_instances.find(instance) == g_instances.end()) {
+                return XR_ERROR_HANDLE_INVALID;
+            }
+        }
 
-        for (uint32_t i = 0; i < 2 && i < viewCapacityInput; i++) {
+        OxDisplayProperties display_props{};
+        g_driver->get_display_properties(&display_props);
+
+        for (uint32_t i = 0; i < kStereoViewCount && i < viewCapacityInput; i++) {
             views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
-
-            auto& config = view_configs.views[i];
-            views[i].recommendedImageRectWidth = config.recommended_width;
-            views[i].maxImageRectWidth = config.recommended_width * 2;
-            views[i].recommendedImageRectHeight = config.recommended_height;
-            views[i].maxImageRectHeight = config.recommended_height * 2;
-            views[i].recommendedSwapchainSampleCount = config.recommended_sample_count;
-            views[i].maxSwapchainSampleCount = config.max_sample_count;
+            views[i].recommendedImageRectWidth = display_props.recommended_width;
+            views[i].maxImageRectWidth = std::max(display_props.display_width, display_props.recommended_width);
+            views[i].recommendedImageRectHeight = display_props.recommended_height;
+            views[i].maxImageRectHeight = std::max(display_props.display_height, display_props.recommended_height);
+            views[i].recommendedSwapchainSampleCount = kRuntimeRecommendedSwapchainSampleCount;
+            views[i].maxSwapchainSampleCount = kRuntimeMaxSwapchainSampleCount;
         }
     }
 
@@ -821,34 +1082,27 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance instance, const XrSess
     }
 #endif
 
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        if (g_instances.find(instance) == g_instances.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+
+        XrSession newSession = AllocateRuntimeHandle<XrSession>();
+        SessionData session_data;
+        session_data.instance = instance;
+        session_data.state = XR_SESSION_STATE_READY;
+        session_data.graphics = graphicsBinding;
+        session_data.has_graphics_binding = hasGraphicsBinding;
+        g_sessions[newSession] = session_data;
+        QueueSessionStateChangeLocked(newSession, XR_SESSION_STATE_READY);
+        *session = newSession;
+    }
+
     if (hasGraphicsBinding) {
         spdlog::info("Session created with graphics binding");
     }
-
-    g_driver->SendRequest(MessageType::CREATE_SESSION);
-
-    auto* shared_data = g_driver->GetSharedData();
-    if (!shared_data) {
-        spdlog::error("xrCreateSession: No driver connection");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-
-    // Wait briefly for the driver connection to set the session handle
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    uint64_t handle = shared_data->active_session_handle.load(std::memory_order_acquire);
-
-    if (handle == 0) {
-        spdlog::error("xrCreateSession: Driver connection did not create session");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-
-    std::lock_guard<std::mutex> lock(g_instance_mutex);
-    XrSession newSession = reinterpret_cast<XrSession>(handle);
-    g_sessions[newSession] = instance;
-    if (hasGraphicsBinding) {
-        g_session_graphics[newSession] = graphicsBinding;
-    }
-    *session = newSession;
+    NotifyDriverSessionState(XR_SESSION_STATE_READY);
 
     spdlog::info("Session created");
     return XR_SUCCESS;
@@ -857,11 +1111,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance instance, const XrSess
 XRAPI_ATTR XrResult XRAPI_CALL xrDestroySession(XrSession session) {
     spdlog::debug("xrDestroySession called");
 
-    g_driver->SendRequest(MessageType::DESTROY_SESSION);
-
     std::lock_guard<std::mutex> lock(g_instance_mutex);
     g_sessions.erase(session);
-    g_session_graphics.erase(session);
 
     spdlog::info("Session destroyed");
     return XR_SUCCESS;
@@ -869,26 +1120,50 @@ XRAPI_ATTR XrResult XRAPI_CALL xrDestroySession(XrSession session) {
 
 XRAPI_ATTR XrResult XRAPI_CALL xrBeginSession(XrSession session, const XrSessionBeginInfo* beginInfo) {
     spdlog::debug("xrBeginSession called");
-    g_driver->SetSessionState(XR_SESSION_STATE_FOCUSED);
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto it = g_sessions.find(session);
+        if (it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        it->second.state = XR_SESSION_STATE_FOCUSED;
+        QueueSessionStateChangeLocked(session, XR_SESSION_STATE_FOCUSED);
+    }
+
+    NotifyDriverSessionState(XR_SESSION_STATE_FOCUSED);
     return XR_SUCCESS;
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL xrEndSession(XrSession session) {
     spdlog::debug("xrEndSession called");
-    g_driver->SetSessionState(XR_SESSION_STATE_IDLE);
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto it = g_sessions.find(session);
+        if (it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        it->second.state = XR_SESSION_STATE_IDLE;
+        QueueSessionStateChangeLocked(session, XR_SESSION_STATE_IDLE);
+    }
+
+    NotifyDriverSessionState(XR_SESSION_STATE_IDLE);
     return XR_SUCCESS;
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL xrRequestExitSession(XrSession session) {
     spdlog::debug("xrRequestExitSession called");
 
-    RequestExitSessionRequest request;
-    request.session_handle = reinterpret_cast<uint64_t>(session);
-
-    if (!g_driver->SendRequest(MessageType::REQUEST_EXIT_SESSION, &request, sizeof(request))) {
-        spdlog::error("Failed to send REQUEST_EXIT_SESSION message");
-        return XR_ERROR_RUNTIME_FAILURE;
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto it = g_sessions.find(session);
+        if (it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        it->second.state = XR_SESSION_STATE_EXITING;
+        QueueSessionStateChangeLocked(session, XR_SESSION_STATE_EXITING);
     }
+
+    NotifyDriverSessionState(XR_SESSION_STATE_EXITING);
 
     return XR_SUCCESS;
 }
@@ -921,12 +1196,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateReferenceSpace(XrSession session, const X
     }
 
     std::lock_guard<std::mutex> lock(g_instance_mutex);
-    uint64_t handle = g_driver->AllocateHandle(HandleType::SPACE);
-    if (handle == 0) {
-        spdlog::error("Failed to allocate space handle from runtime driver");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-    XrSpace newSpace = reinterpret_cast<XrSpace>(handle);
+    XrSpace newSpace = AllocateRuntimeHandle<XrSpace>();
     g_spaces[newSpace] = session;
 
     // Store reference space metadata
@@ -955,80 +1225,68 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace baseSpace, X
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    std::lock_guard<std::mutex> lock(g_instance_mutex);
+    std::string action_user_path;
+    bool is_action_space = false;
+    bool is_view_reference_space = false;
 
-    // Check if this is an action space
-    auto it = g_action_spaces.find(space);
-    if (it != g_action_spaces.end()) {
-        // This is an action space - get controller pose from shared memory
-        auto* shared_data = g_driver->GetSharedData();
-        if (!shared_data) {
-            location->locationFlags = 0;
-            return XR_SUCCESS;
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto space_session_it = g_spaces.find(space);
+        if (space_session_it == g_spaces.end()) {
+            return XR_ERROR_HANDLE_INVALID;
         }
 
-        // Determine device index from subaction path
-        int device_index = -1;
-        if (it->second.subaction_path != 0) {
-            // Convert path to string to get user path
-            char subaction_path_str[256];
-            uint32_t len = 0;
-            auto sessions_it = g_spaces.find(space);
-            if (sessions_it != g_spaces.end()) {
-                auto instance_it = g_sessions.find(sessions_it->second);
-                if (instance_it != g_sessions.end()) {
-                    xrPathToString(instance_it->second, it->second.subaction_path, sizeof(subaction_path_str), &len,
-                                   subaction_path_str);
-                    std::string user_path(subaction_path_str);
-                    device_index = FindDeviceIndex(user_path);
+        auto action_it = g_action_spaces.find(space);
+        if (action_it != g_action_spaces.end()) {
+            is_action_space = true;
+            if (action_it->second.subaction_path != XR_NULL_PATH) {
+                action_user_path = PathToStringLocked(action_it->second.subaction_path);
+            }
+        }
+
+        auto ref_it = g_reference_spaces.find(space);
+        if (ref_it != g_reference_spaces.end() && ref_it->second.type == XR_REFERENCE_SPACE_TYPE_VIEW) {
+            is_view_reference_space = true;
+        }
+    }
+
+    if (is_action_space) {
+        const DeviceSnapshot devices = CaptureDevices(time);
+        for (uint32_t index = 0; index < devices.count; ++index) {
+            const OxDeviceState& device = devices.devices[index];
+            if (action_user_path == device.user_path) {
+                if (device.is_active) {
+                    location->locationFlags =
+                        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                        XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+                    location->pose.position = {device.pose.position.x, device.pose.position.y, device.pose.position.z};
+                    location->pose.orientation = {device.pose.orientation.x, device.pose.orientation.y,
+                                                  device.pose.orientation.z, device.pose.orientation.w};
+                } else {
+                    location->locationFlags = 0;
                 }
+                return XR_SUCCESS;
             }
         }
 
-        if (device_index >= 0 && device_index < MAX_TRACKED_DEVICES) {
-            // Read device pose from shared memory
-            auto& device_data = shared_data->frame_state.device_poses[device_index];
-
-            if (device_data.is_active) {
-                location->locationFlags =
-                    XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
-                    XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
-
-                location->pose = device_data.pose.pose;
-            } else {
-                // Device not active
-                location->locationFlags = 0;
-            }
-        } else {
-            location->locationFlags = 0;
-        }
-
+        location->locationFlags = 0;
         return XR_SUCCESS;
     }
 
-    // Check if this is a VIEW reference space - return actual headset pose from simulator
-    auto ref_it = g_reference_spaces.find(space);
-    if (ref_it != g_reference_spaces.end() && ref_it->second.type == XR_REFERENCE_SPACE_TYPE_VIEW) {
-        auto* shared_data = g_driver->GetSharedData();
-        if (shared_data && shared_data->frame_state.view_count.load(std::memory_order_acquire) >= 2) {
-            // Calculate center between left and right eye poses
-            auto& left_eye = shared_data->frame_state.views[0].pose.pose;
-            auto& right_eye = shared_data->frame_state.views[1].pose.pose;
+    if (is_view_reference_space) {
+        OxPose left_eye{};
+        OxPose right_eye{};
+        g_driver->update_view_pose(time, 0, &left_eye);
+        g_driver->update_view_pose(time, 1, &right_eye);
 
-            location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
-                                      XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
-                                      XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
-
-            // Average position between eyes
-            location->pose.position.x = (left_eye.position.x + right_eye.position.x) * 0.5f;
-            location->pose.position.y = (left_eye.position.y + right_eye.position.y) * 0.5f;
-            location->pose.position.z = (left_eye.position.z + right_eye.position.z) * 0.5f;
-
-            // Use left eye orientation (both eyes should have same orientation)
-            location->pose.orientation = left_eye.orientation;
-
-            return XR_SUCCESS;
-        }
+        location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                  XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+        location->pose.position.x = (left_eye.position.x + right_eye.position.x) * 0.5f;
+        location->pose.position.y = (left_eye.position.y + right_eye.position.y) * 0.5f;
+        location->pose.position.z = (left_eye.position.z + right_eye.position.z) * 0.5f;
+        location->pose.orientation = {left_eye.orientation.x, left_eye.orientation.y, left_eye.orientation.z,
+                                      left_eye.orientation.w};
+        return XR_SUCCESS;
     }
 
     // Regular reference space (LOCAL, STAGE) - return identity pose
@@ -1088,15 +1346,27 @@ XRAPI_ATTR XrResult XRAPI_CALL xrWaitFrame(XrSession session, const XrFrameWaitI
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    // Read frame data from shared memory
-    auto* shared_data = g_driver->GetSharedData();
-    if (shared_data) {
-        frameState->predictedDisplayTime =
-            shared_data->frame_state.predicted_display_time.load(std::memory_order_acquire);
-        frameState->predictedDisplayPeriod = 11111111;  // ~90 FPS
-    } else {
-        frameState->predictedDisplayTime = 0;
-        frameState->predictedDisplayPeriod = 11111111;
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto it = g_sessions.find(session);
+        if (it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+    }
+
+    OxDisplayProperties display_props{};
+    g_driver->get_display_properties(&display_props);
+
+    frameState->predictedDisplayPeriod = ComputeDisplayPeriodNanos(display_props.refresh_rate);
+    frameState->predictedDisplayTime = NowNanos() + frameState->predictedDisplayPeriod;
+
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto it = g_sessions.find(session);
+        if (it != g_sessions.end()) {
+            it->second.last_predicted_display_time = frameState->predictedDisplayTime;
+            it->second.predicted_display_period = frameState->predictedDisplayPeriod;
+        }
     }
 
     frameState->shouldRender = XR_TRUE;
@@ -1114,8 +1384,16 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    if (!g_driver->IsConnected()) {
-        spdlog::error("Driver connection not available");
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto session_it = g_sessions.find(session);
+        if (session_it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+    }
+
+    if (!g_driver) {
+        spdlog::error("Driver callbacks not available");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
@@ -1137,15 +1415,17 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
                     const XrCompositionLayerProjectionView& view = projLayer->views[viewIdx];
                     XrSwapchain swapchain = view.subImage.swapchain;
 
-                    // Look up swapchain data
-                    std::lock_guard<std::mutex> lock(g_instance_mutex);
-                    auto swapchainIt = g_swapchains.find(swapchain);
-                    if (swapchainIt == g_swapchains.end()) {
-                        spdlog::error("Invalid swapchain in submitted layer");
-                        continue;
+                    SwapchainData swapchainData;
+                    {
+                        std::lock_guard<std::mutex> lock(g_instance_mutex);
+                        auto swapchainIt = g_swapchains.find(swapchain);
+                        if (swapchainIt == g_swapchains.end()) {
+                            spdlog::error("Invalid swapchain in submitted layer");
+                            continue;
+                        }
+                        swapchainData = swapchainIt->second;
                     }
 
-                    const SwapchainData& swapchainData = swapchainIt->second;
                     // Get the current swapchain image index (we use 0 for now, real impl tracks acquired index)
                     uint32_t imageIdx = 0;
                     size_t destSize = static_cast<size_t>(swapchainData.width) * swapchainData.height * 4;
@@ -1191,9 +1471,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
                     }
 
                     if (copySuccess) {
-                        g_driver->SubmitFramePixels(viewIdx, swapchainData.width, swapchainData.height,
-                                                    static_cast<uint32_t>(swapchainData.format), submitBuffer.data(),
-                                                    static_cast<uint32_t>(destSize));
+                        if (g_driver->submit_frame_pixels) {
+                            g_driver->submit_frame_pixels(viewIdx, swapchainData.width, swapchainData.height,
+                                                          static_cast<uint32_t>(swapchainData.format),
+                                                          submitBuffer.data(), static_cast<uint32_t>(destSize));
+                        }
                         spdlog::debug(("Copied texture for eye " + std::to_string(viewIdx)).c_str());
                     } else {
                         spdlog::error(("Failed to copy texture for eye " + std::to_string(viewIdx)).c_str());
@@ -1214,7 +1496,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession session, const XrViewLoca
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    *viewCountOutput = 2;
+    *viewCountOutput = kStereoViewCount;
 
     if (viewCapacityInput == 0) {
         return XR_SUCCESS;
@@ -1222,23 +1504,31 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession session, const XrViewLoca
 
     viewState->viewStateFlags = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
 
-    // Read pose data from shared memory
-    auto* shared_data = g_driver->GetSharedData();
-    if (views && viewCapacityInput >= 2 && shared_data) {
-        uint32_t view_count = shared_data->frame_state.view_count.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto session_it = g_sessions.find(session);
+        if (session_it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+    }
 
-        for (uint32_t i = 0; i < 2 && i < viewCapacityInput; i++) {
+    OxDisplayProperties display_props{};
+    g_driver->get_display_properties(&display_props);
+
+    if (views && viewCapacityInput >= kStereoViewCount) {
+        for (uint32_t i = 0; i < kStereoViewCount && i < viewCapacityInput; i++) {
             views[i].type = XR_TYPE_VIEW;
             views[i].next = nullptr;
 
-            auto& view_data = shared_data->frame_state.views[i];
-
-            views[i].pose = view_data.pose.pose;
-
-            views[i].fov.angleLeft = view_data.fov[0];
-            views[i].fov.angleRight = view_data.fov[1];
-            views[i].fov.angleUp = view_data.fov[2];
-            views[i].fov.angleDown = view_data.fov[3];
+            OxPose pose{};
+            g_driver->update_view_pose(viewLocateInfo->displayTime, i, &pose);
+            views[i].pose.position = {pose.position.x, pose.position.y, pose.position.z};
+            views[i].pose.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z,
+                                         pose.orientation.w};
+            views[i].fov.angleLeft = display_props.fov.angle_left;
+            views[i].fov.angleRight = display_props.fov.angle_right;
+            views[i].fov.angleUp = display_props.fov.angle_up;
+            views[i].fov.angleDown = display_props.fov.angle_down;
         }
     }
 
@@ -1252,12 +1542,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateActionSet(XrInstance instance, const XrAc
     if (!createInfo || !actionSet) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    uint64_t handle = g_driver->AllocateHandle(HandleType::ACTION_SET);
-    if (handle == 0) {
-        spdlog::error("Failed to allocate action set handle from runtime driver");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-    *actionSet = reinterpret_cast<XrActionSet>(handle);
+    *actionSet = AllocateRuntimeHandle<XrActionSet>();
     return XR_SUCCESS;
 }
 
@@ -1272,12 +1557,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateAction(XrActionSet actionSet, const XrAct
     if (!createInfo || !action) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    uint64_t handle = g_driver->AllocateHandle(HandleType::ACTION);
-    if (handle == 0) {
-        spdlog::error("Failed to allocate action handle from runtime driver");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-    *action = reinterpret_cast<XrAction>(handle);
+    *action = AllocateRuntimeHandle<XrAction>();
 
     // Store action metadata
     std::lock_guard<std::mutex> lock(g_instance_mutex);
@@ -1385,41 +1665,40 @@ XRAPI_ATTR XrResult XRAPI_CALL xrAttachSessionActionSets(XrSession session,
                                                          const XrSessionActionSetsAttachInfo* attachInfo) {
     spdlog::debug("xrAttachSessionActionSets called");
 
-    // When action sets are attached, select the best matching interaction profile
-    std::lock_guard<std::mutex> lock(g_instance_mutex);
+    XrInstance instance = XR_NULL_HANDLE;
+    std::vector<std::string> suggested_profiles;
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto it = g_sessions.find(session);
+        if (it == g_sessions.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        instance = it->second.instance;
+        suggested_profiles = g_suggested_profiles;
+    }
 
-    // Get driver-supported profiles from service
-    const auto& driver_profiles = g_driver->GetInteractionProfiles();
+    const std::vector<std::string> driver_profiles = GetInteractionProfiles();
 
     // Try to find a match between suggested profiles and driver-supported profiles
-    for (const auto& suggested : g_suggested_profiles) {
-        for (uint32_t i = 0; i < driver_profiles.profile_count && i < 8; i++) {
-            std::string driver_profile(driver_profiles.profiles[i]);
+    for (const auto& suggested : suggested_profiles) {
+        for (const auto& driver_profile : driver_profiles) {
             if (suggested == driver_profile) {
-                // Found a match! Set this as the active profile
-                auto it = g_sessions.find(session);
-                if (it != g_sessions.end()) {
-                    XrInstance instance = it->second;
-                    XrResult result = xrStringToPath(instance, suggested.c_str(), &g_current_interaction_profile);
-                    if (result == XR_SUCCESS) {
-                        spdlog::info(("Activated interaction profile: " + suggested).c_str());
-                        return XR_SUCCESS;
-                    }
+                std::lock_guard<std::mutex> lock(g_instance_mutex);
+                XrResult result = xrStringToPath(instance, suggested.c_str(), &g_current_interaction_profile);
+                if (result == XR_SUCCESS) {
+                    spdlog::info(("Activated interaction profile: " + suggested).c_str());
+                    return XR_SUCCESS;
                 }
             }
         }
     }
 
     // If no match found but driver has profiles, use the first one
-    if (driver_profiles.profile_count > 0) {
-        auto it = g_sessions.find(session);
-        if (it != g_sessions.end()) {
-            XrInstance instance = it->second;
-            std::string profile(driver_profiles.profiles[0]);
-            XrResult result = xrStringToPath(instance, profile.c_str(), &g_current_interaction_profile);
-            if (result == XR_SUCCESS) {
-                spdlog::info(("Activated default driver profile: " + profile).c_str());
-            }
+    if (!driver_profiles.empty()) {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        XrResult result = xrStringToPath(instance, driver_profiles.front().c_str(), &g_current_interaction_profile);
+        if (result == XR_SUCCESS) {
+            spdlog::info(("Activated default driver profile: " + driver_profiles.front()).c_str());
         }
     }
 
@@ -1501,12 +1780,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateActionSpace(XrSession session, const XrAc
     }
 
     std::lock_guard<std::mutex> lock(g_instance_mutex);
-    uint64_t handle = g_driver->AllocateHandle(HandleType::SPACE);
-    if (handle == 0) {
-        spdlog::error("Failed to allocate action space handle from runtime driver");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-    XrSpace newSpace = reinterpret_cast<XrSpace>(handle);
+    XrSpace newSpace = AllocateRuntimeHandle<XrSpace>();
     g_spaces[newSpace] = session;
 
     // Store action space metadata
@@ -1551,7 +1825,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetInputSourceLocalizedName(XrSession session,
         return XR_ERROR_VALIDATION_FAILURE;
     }
     const char* name = "Unknown";
-    uint32_t len = strlen(name) + 1;
+    uint32_t len = static_cast<uint32_t>(std::strlen(name) + 1);
     if (bufferCountOutput) {
         *bufferCountOutput = len;
     }
@@ -1637,12 +1911,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSwapchain(XrSession session, const XrSwap
         return XR_ERROR_FEATURE_UNSUPPORTED;
     }
 
-    uint64_t handle = g_driver->AllocateHandle(HandleType::SWAPCHAIN);
-    if (handle == 0) {
-        spdlog::error("Failed to allocate swapchain handle from runtime driver");
-        return XR_ERROR_RUNTIME_FAILURE;
-    }
-    *swapchain = reinterpret_cast<XrSwapchain>(handle);
+    *swapchain = AllocateRuntimeHandle<XrSwapchain>();
 
     // Store swapchain data for later texture creation
     std::lock_guard<std::mutex> lock(g_instance_mutex);
@@ -1656,9 +1925,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSwapchain(XrSession session, const XrSwap
 #endif
 
     // Determine graphics API from session and store relevant device handles
-    auto graphicsIt = g_session_graphics.find(session);
-    if (graphicsIt != g_session_graphics.end()) {
-        data.graphicsAPI = graphicsIt->second.graphicsAPI;
+    auto sessionIt = g_sessions.find(session);
+    if (sessionIt != g_sessions.end() && sessionIt->second.has_graphics_binding) {
+        data.graphicsAPI = sessionIt->second.graphics.graphicsAPI;
 
         switch (data.graphicsAPI) {
 #ifdef OX_OPENGL
@@ -1669,7 +1938,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSwapchain(XrSession session, const XrSwap
 #ifdef OX_VULKAN
             case GraphicsAPI::Vulkan: {
                 vulkan::VulkanSwapchainData vkData;
-                if (vulkan::InitializeSwapchainData(graphicsIt->second.bindingData, vkData)) {
+                if (vulkan::InitializeSwapchainData(sessionIt->second.graphics.bindingData, vkData)) {
                     data.vkDevice = vkData.device;
                     data.vkPhysicalDevice = vkData.physicalDevice;
                     data.vkQueue = vkData.queue;
@@ -1681,7 +1950,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSwapchain(XrSession session, const XrSwap
 #ifdef OX_METAL
             case GraphicsAPI::Metal:
                 // Store command queue for texture creation
-                data.metalCommandQueue = graphicsIt->second.bindingData;
+                data.metalCommandQueue = sessionIt->second.graphics.bindingData;
                 spdlog::debug("Stored Metal command queue for swapchain");
                 break;
 #endif
@@ -1866,7 +2135,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrPathToString(XrInstance instance, XrPath path, 
     // Look up the path string
     auto it = g_path_to_string.find(path);
     const char* str = (it != g_path_to_string.end()) ? it->second.c_str() : "/unknown/path";
-    uint32_t len = strlen(str) + 1;
+    uint32_t len = static_cast<uint32_t>(std::strlen(str) + 1);
 
     if (bufferCountOutput) {
         *bufferCountOutput = len;
@@ -1888,16 +2157,20 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateViveTrackerPathsHTCX(XrInstance instan
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    std::lock_guard<std::mutex> lock(g_instance_mutex);
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        if (g_instances.find(instance) == g_instances.end()) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+    }
 
-    // Build device map if not already built
-    BuildDeviceMap();
+    const DeviceSnapshot devices = CaptureDevices(NowNanos());
 
-    // Count trackers - look for devices with /user/vive_tracker_htcx paths
-    std::vector<std::pair<std::string, int>> tracker_devices;
-    for (const auto& [user_path, device_index] : g_device_path_to_index) {
+    std::vector<std::string> tracker_devices;
+    for (uint32_t index = 0; index < devices.count; ++index) {
+        const std::string user_path = devices.devices[index].user_path;
         if (user_path.find("/user/vive_tracker_htcx/role/") == 0) {
-            tracker_devices.push_back({user_path, device_index});
+            tracker_devices.push_back(user_path);
         }
     }
 
@@ -1915,7 +2188,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateViveTrackerPathsHTCX(XrInstance instan
         paths[i].next = nullptr;
 
         // Convert user path string to XrPath
-        const std::string& user_path = tracker_devices[i].first;
+        const std::string& user_path = tracker_devices[i];
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
         xrStringToPath(instance, user_path.c_str(), &paths[i].persistentPath);
         paths[i].rolePath = paths[i].persistentPath;  // For simplicity, use same path
     }
@@ -2066,6 +2340,11 @@ xrNegotiateLoaderRuntimeInterface(const XrNegotiateLoaderInfo* loaderInfo, XrNeg
     if (runtimeRequest->structType != XR_LOADER_INTERFACE_STRUCT_RUNTIME_REQUEST ||
         runtimeRequest->structVersion != XR_RUNTIME_INFO_STRUCT_VERSION ||
         runtimeRequest->structSize != sizeof(XrNegotiateRuntimeRequest)) {
+        return XR_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (!EnsureDriverLoaded()) {
+        spdlog::error("Failed to load runtime driver during loader negotiation");
         return XR_ERROR_INITIALIZATION_FAILED;
     }
 
