@@ -114,6 +114,9 @@ enum class GraphicsAPI { OpenGL, Vulkan, Metal };
 #define RUNTIME_EXPORT __attribute__((visibility("default")))
 #endif
 
+// Forward declaration so LoadConfiguredDriver can call it
+extern "C" RUNTIME_EXPORT int oxSetDriverCallbacks(const OxDriverCallbacks* callbacks);
+
 namespace {
 
 constexpr uint32_t kStereoViewCount = 2;
@@ -180,18 +183,6 @@ HandleType AllocateRuntimeHandle() {
     return reinterpret_cast<HandleType>(g_next_handle.fetch_add(1, std::memory_order_relaxed));
 }
 
-void UnloadDriver() {
-    if (g_driver && g_driver->shutdown) {
-        g_driver->shutdown();
-    }
-
-    g_driver.reset();
-    g_driver_library.reset();
-}
-
-constexpr std::string_view kSimulatorDriverName = "drivers/ox-simulator/ox_driver";
-constexpr std::string_view kFrontendDriverName = "ox_ipc_frontend";
-
 fs::path ModuleDirectory() {
     const int module_path_length = wai_getModulePath(nullptr, 0, nullptr);
     if (module_path_length <= 0) {
@@ -207,43 +198,59 @@ fs::path ModuleDirectory() {
     return fs::path(module_path.c_str()).parent_path();
 }
 
-fs::path NormalizeLibraryPath(const std::string& configured_path) {
-    fs::path path(configured_path);
-    if (path.is_relative()) {
-        path = ModuleDirectory() / path;
-    }
-    return fs::absolute(path);
-}
-
-std::string GetEnvironmentValue(const char* name) {
+std::string GetEnvVar(const char* name) {
 #ifdef _WIN32
     char* value = nullptr;
-    size_t value_size = 0;
-    if (_dupenv_s(&value, &value_size, name) != 0 || value == nullptr) {
-        return {};
+    size_t size = 0;
+    if (_dupenv_s(&value, &size, name) == 0 && value) {
+        std::string result(value);
+        std::free(value);
+        return result;
     }
-
-    std::string result(value);
-    std::free(value);
-    return result;
+    if (value) std::free(value);
+    return {};
 #else
     const char* value = std::getenv(name);
-    return value ? std::string(value) : std::string();
+    return value ? value : "";
 #endif
 }
 
-std::string ResolveDriverLibraryName() {
-    const std::string configured_path = GetEnvironmentValue("OX_RUNTIME_DRIVER");
-    if (!configured_path.empty()) {
-        return NormalizeLibraryPath(configured_path).string();
+bool LoadConfiguredDriver() {
+    const std::string env_driver = GetEnvVar("OX_RUNTIME_DRIVER");
+    fs::path lib_path;
+    if (!env_driver.empty()) {
+        lib_path = fs::absolute(env_driver);
+    } else if (GetEnvVar("OX_USE_SIMULATOR") == "1") {
+        lib_path = ModuleDirectory() / "drivers/ox-simulator/ox_driver";
+    } else {
+        lib_path = ModuleDirectory() / "ox_ipc_frontend";
     }
 
-    const std::string use_simulator = GetEnvironmentValue("OX_USE_SIMULATOR");
-    if (use_simulator == "1") {
-        return (ModuleDirectory() / kSimulatorDriverName).string();
+    const std::string lib_str = lib_path.string();
+    try {
+        auto lib = std::make_unique<dylib::library>(lib_str, dylib::decorations::os_default());
+        auto ox_driver_register = lib->get_function<int(OxDriverCallbacks*)>("ox_driver_register");
+        OxDriverCallbacks callbacks{};
+        if (!ox_driver_register || !ox_driver_register(&callbacks)) {
+            spdlog::error("Driver registration failed for {}", lib_str);
+            return false;
+        }
+        if (!oxSetDriverCallbacks(&callbacks)) {
+            return false;
+        }
+        g_driver_library = std::move(lib);
+        spdlog::info("Loaded driver: {}", lib_str);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to load driver {}: {}", lib_str, e.what());
+        return false;
     }
+}
 
-    return (ModuleDirectory() / kFrontendDriverName).string();
+void UnloadDriver() {
+    if (g_driver && g_driver->shutdown) g_driver->shutdown();
+    g_driver.reset();
+    g_driver_library.reset();
 }
 
 OxSessionState ToOxSessionState(XrSessionState state) {
@@ -256,58 +263,6 @@ XrDuration ComputeDisplayPeriodNanos(float refresh_rate_hz) {
     }
 
     return static_cast<XrDuration>(1000000000.0 / static_cast<double>(refresh_rate_hz));
-}
-
-bool InstallDriver(OxDriverCallbacks callbacks, std::unique_ptr<dylib::library> library) {
-    if (!callbacks.initialize || !callbacks.is_device_connected || !callbacks.get_device_info ||
-        !callbacks.get_display_properties || !callbacks.get_tracking_capabilities || !callbacks.update_view_pose) {
-        spdlog::error("Driver missing required callbacks");
-        return false;
-    }
-
-    if (!callbacks.initialize()) {
-        spdlog::error("Driver initialize() failed");
-        return false;
-    }
-
-    UnloadDriver();
-    g_driver_library = std::move(library);
-    g_driver = std::make_unique<OxDriverCallbacks>(callbacks);
-    return true;
-}
-
-bool LoadDriverLibrary(const std::string& library_name) {
-    try {
-        auto library = std::make_unique<dylib::library>(library_name, dylib::decorations::os_default());
-        auto register_driver = library->get_function<int(OxDriverCallbacks*)>("ox_driver_register");
-
-        OxDriverCallbacks callbacks{};
-        if (!register_driver || !register_driver(&callbacks)) {
-            spdlog::error("Driver registration failed for {}", library_name);
-            return false;
-        }
-
-        if (!InstallDriver(callbacks, std::move(library))) {
-            return false;
-        }
-
-        spdlog::info("Loaded runtime driver");
-        return true;
-    } catch (const dylib::exception& e) {
-        spdlog::error("Failed to load driver library {}: {}", library_name, e.what());
-        return false;
-    } catch (const std::exception& e) {
-        spdlog::error("Unexpected error loading driver library {}: {}", library_name, e.what());
-        return false;
-    }
-}
-
-bool EnsureDriverLoaded() {
-    if (g_driver) {
-        return true;
-    }
-
-    return LoadDriverLibrary(ResolveDriverLibraryName());
 }
 
 std::vector<std::string> GetInteractionProfiles() {
@@ -355,18 +310,27 @@ void NotifyDriverSessionState(XrSessionState state) {
 }  // namespace
 
 extern "C" {
-RUNTIME_EXPORT void oxSetDriverCallbacks(const OxDriverCallbacks* callbacks) {
+RUNTIME_EXPORT int oxSetDriverCallbacks(const OxDriverCallbacks* callbacks) {
     if (!callbacks) {
         UnloadDriver();
-        return;
+        return 1;
     }
 
-    if (!InstallDriver(*callbacks, nullptr)) {
-        spdlog::error("Failed to install injected driver callbacks");
-        return;
+    if (!callbacks->initialize || !callbacks->is_device_connected || !callbacks->get_device_info ||
+        !callbacks->get_display_properties || !callbacks->get_tracking_capabilities || !callbacks->update_view_pose) {
+        spdlog::error("Driver missing required callbacks");
+        return 0;
     }
 
+    if (!callbacks->initialize()) {
+        spdlog::error("Driver initialize() failed");
+        return 0;
+    }
+
+    UnloadDriver();
+    g_driver = std::make_unique<OxDriverCallbacks>(*callbacks);
     spdlog::info("Installed runtime driver");
+    return 1;
 }
 }
 
@@ -2343,7 +2307,7 @@ xrNegotiateLoaderRuntimeInterface(const XrNegotiateLoaderInfo* loaderInfo, XrNeg
         return XR_ERROR_INITIALIZATION_FAILED;
     }
 
-    if (!EnsureDriverLoaded()) {
+    if (!g_driver && !LoadConfiguredDriver()) {
         spdlog::error("Failed to load runtime driver during loader negotiation");
         return XR_ERROR_INITIALIZATION_FAILED;
     }
