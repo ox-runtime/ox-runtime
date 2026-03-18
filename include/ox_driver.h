@@ -112,6 +112,10 @@ struct OxDriverCallbacks {
     // Called when runtime shuts down
     void (*shutdown)(void);
 
+    // Return: 1 if the driver is still running, 0 to signal the host to unload the driver.
+    // Optional - Defaults to 1 (i.e. running), if this callback is not provided.
+    int (*is_driver_running)(void);
+
     // ========== Device Discovery ==========
 
     // Check if physical device is connected and ready
