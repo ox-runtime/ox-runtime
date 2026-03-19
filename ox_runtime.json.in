@@ -2,6 +2,6 @@
     "file_format_version": "1.0.0",
     "runtime": {
         "name": "ox-runtime",
-        "library_path": "@RUNTIME_LIBRARY_PATH@"
+        "library_path": "./$<TARGET_FILE_NAME:ox_runtime>"
     }
 }

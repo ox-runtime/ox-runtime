@@ -126,36 +126,6 @@ configure_graphics(ox_runtime)
 
 target_link_libraries(ox_runtime PRIVATE spdlog::spdlog dylib whereami)
 
-if(WIN32)
-    target_compile_definitions(ox_runtime PRIVATE
-        XR_USE_PLATFORM_WIN32
-        XR_RUNTIME_EXPORTS
-    )
-    set(RUNTIME_LIBRARY_NAME "ox_runtime.dll")
-    set(RUNTIME_LIBRARY_PATH "./ox_runtime.dll")
-elseif(APPLE)
-    target_compile_definitions(ox_runtime PRIVATE
-        XR_USE_PLATFORM_MACOS
-        GL_SILENCE_DEPRECATION
-    )
-    set_target_properties(ox_runtime PROPERTIES
-        VERSION ${PROJECT_VERSION}
-        SOVERSION 1
-    )
-    set(RUNTIME_LIBRARY_NAME "libox_runtime.dylib")
-    set(RUNTIME_LIBRARY_PATH "./libox_runtime.dylib")
-else()
-    target_compile_definitions(ox_runtime PRIVATE
-        XR_USE_PLATFORM_XLIB
-    )
-    set_target_properties(ox_runtime PROPERTIES
-        VERSION ${PROJECT_VERSION}
-        SOVERSION 1
-    )
-    set(RUNTIME_LIBRARY_NAME "libox_runtime.so")
-    set(RUNTIME_LIBRARY_PATH "./libox_runtime.so")
-endif()
-
 set_target_properties(ox_runtime PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
@@ -168,11 +138,9 @@ set_target_properties(ox_runtime PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/lib
 )
 
-set(MANIFEST_OUTPUT "${CMAKE_BINARY_DIR}/bin/ox_runtime.json")
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/ox_runtime.json.in"
-    "${MANIFEST_OUTPUT}"
-    @ONLY
+file(GENERATE
+    OUTPUT "${CMAKE_BINARY_DIR}/bin/ox_runtime.json"
+    INPUT "${CMAKE_CURRENT_SOURCE_DIR}/ox_runtime.json.in"
 )
 
 install(TARGETS ox_runtime
