@@ -1,5 +1,7 @@
 ﻿// Include platform headers
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <unknwn.h>
 #include <windows.h>
 #elif defined(__APPLE__)
@@ -12,15 +14,18 @@
 #include <GL/gl.h>
 #elif defined(__APPLE__)
 #include <OpenGL/gl.h>
+#define GL_SILENCE_DEPRECATION
 #else
 #include <GL/gl.h>
 #include <GL/glx.h>
 #include <X11/Xlib.h>
 #endif
+#define XR_USE_GRAPHICS_API_OPENGL
 #endif
 
 #ifdef OX_VULKAN
 #include <vulkan/vulkan.h>
+#define XR_USE_GRAPHICS_API_VULKAN
 #endif
 
 #ifdef OX_METAL
@@ -28,6 +33,8 @@
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#define XR_USE_GRAPHICS_API_METAL
+#define XR_KHR_metal_enable 1
 #endif
 #endif
 #endif
