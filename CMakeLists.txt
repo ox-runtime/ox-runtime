@@ -84,14 +84,20 @@ endif()
 
 function(configure_graphics target)
     if(OX_OPENGL)
+        target_compile_definitions(${target} PRIVATE OX_OPENGL=1)
         find_package(OpenGL REQUIRED)
         target_link_libraries(${target} PRIVATE OpenGL::GL)
     endif()
 
     if(OX_VULKAN)
+        target_compile_definitions(${target} PRIVATE OX_VULKAN=1)
         find_package(Vulkan REQUIRED)
         target_link_libraries(${target} PRIVATE Vulkan::Vulkan)
         target_include_directories(${target} PRIVATE ${Vulkan_INCLUDE_DIRS})
+    endif()
+
+    if(OX_METAL)
+        target_compile_definitions(${target} PRIVATE OX_METAL=1)
     endif()
 
     if(APPLE AND OX_METAL)
