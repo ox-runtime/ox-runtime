@@ -115,7 +115,7 @@ enum class GraphicsAPI { OpenGL, Vulkan, Metal };
 #endif
 
 // Forward declaration so LoadConfiguredDriver can call it
-extern "C" RUNTIME_EXPORT int oxSetDriverCallbacks(const OxDriverCallbacks* callbacks);
+extern "C" RUNTIME_EXPORT int ox_set_driver(const OxDriverCallbacks* callbacks);
 
 namespace {
 
@@ -235,7 +235,7 @@ bool LoadConfiguredDriver() {
             spdlog::error("Driver registration failed for {}", lib_str);
             return false;
         }
-        if (!oxSetDriverCallbacks(&callbacks)) {
+        if (!ox_set_driver(&callbacks)) {
             return false;
         }
         g_driver_library = std::move(lib);
@@ -310,7 +310,7 @@ void NotifyDriverSessionState(XrSessionState state) {
 }  // namespace
 
 extern "C" {
-RUNTIME_EXPORT int oxSetDriverCallbacks(const OxDriverCallbacks* callbacks) {
+RUNTIME_EXPORT int ox_set_driver(const OxDriverCallbacks* callbacks) {
     if (!callbacks) {
         UnloadDriver();
         return 1;

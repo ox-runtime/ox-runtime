@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-extern "C" void oxSetDriverCallbacks(const OxDriverCallbacks* callbacks);
+extern "C" void ox_set_driver(const OxDriverCallbacks* callbacks);
 
 namespace ox {
 namespace test {
@@ -219,7 +219,7 @@ class RuntimeTestBase : public ::testing::Test {
         driver_state.ResetDefaults();
         FakeDriverState::active = &driver_state;
         callbacks_ = driver_state.BuildCallbacks();
-        oxSetDriverCallbacks(&callbacks_);
+        ox_set_driver(&callbacks_);
     }
 
     void TearDown() override {
@@ -227,7 +227,7 @@ class RuntimeTestBase : public ::testing::Test {
             xrDestroyInstance(instance);
         }
         created_instances_.clear();
-        oxSetDriverCallbacks(nullptr);
+        ox_set_driver(nullptr);
         FakeDriverState::active = nullptr;
     }
 
