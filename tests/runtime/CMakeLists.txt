@@ -15,9 +15,9 @@ add_executable(runtime_tests ${RUNTIME_TEST_SOURCES})
 
 target_include_directories(runtime_tests PRIVATE
     ${OPENXR_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${OX_DRIVER_INCLUDE_DIR}
 )
 
 target_compile_definitions(runtime_tests PRIVATE
