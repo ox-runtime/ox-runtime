@@ -10,9 +10,26 @@ if(NOT WIN32)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
-if(NOT TARGET spdlog::spdlog)
-    include(FetchContent)
+include(FetchContent)
 
+set(OX_DRIVER_HEADER_LOCAL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/ox_driver.h")
+if(EXISTS "${OX_DRIVER_HEADER_LOCAL_PATH}")
+    set(OX_DRIVER_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+else()
+    FetchContent_Declare(
+        ox_driver_header
+        URL https://github.com/ox-runtime/ox/releases/latest/download/ox_driver.h
+        DOWNLOAD_NO_EXTRACT TRUE
+        DOWNLOAD_NAME ox_driver.h
+    )
+    FetchContent_GetProperties(ox_driver_header)
+    if(NOT ox_driver_header_POPULATED)
+        FetchContent_Populate(ox_driver_header)
+    endif()
+    set(OX_DRIVER_INCLUDE_DIR "${ox_driver_header_SOURCE_DIR}")
+endif()
+
+if(NOT TARGET spdlog::spdlog)
     FetchContent_Declare(
         spdlog
         GIT_REPOSITORY https://github.com/gabime/spdlog
@@ -122,8 +139,8 @@ add_library(ox_runtime SHARED ${OX_RUNTIME_SOURCES})
 
 target_include_directories(ox_runtime PRIVATE
     ${OPENXR_INCLUDE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${OX_DRIVER_INCLUDE_DIR}
 )
 
 target_compile_definitions(ox_runtime PRIVATE
