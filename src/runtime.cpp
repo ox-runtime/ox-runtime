@@ -152,6 +152,7 @@ struct SessionData {
     XrSessionState state = XR_SESSION_STATE_IDLE;
     XrTime last_predicted_display_time = 0;
     XrDuration predicted_display_period = kDefaultDisplayPeriodNanos;
+    XrTime last_end_frame_time = 0;
     SessionGraphicsBinding graphics;
     bool has_graphics_binding = false;
 };
@@ -312,8 +313,8 @@ RUNTIME_EXPORT int ox_set_driver(const OxDriverCallbacks* callbacks) {
         return 1;
     }
 
-    if (!callbacks->initialize || !callbacks->is_device_connected || !callbacks->get_device_info ||
-        !callbacks->get_display_properties || !callbacks->get_tracking_capabilities || !callbacks->update_view_pose) {
+    if (!callbacks->initialize || !callbacks->is_device_connected || !callbacks->get_system_properties ||
+        !callbacks->update_view) {
         spdlog::error("Driver missing required callbacks");
         return 0;
     }
@@ -530,9 +531,9 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
                 continue;
             }
 
-            uint32_t boolean_value = value ? 1u : 0u;
+            XrBool32 boolean_value = value ? XR_TRUE : XR_FALSE;
             available = g_driver->get_input_state_boolean(predicted_time, user_path.c_str(), component_path.c_str(),
-                                                          &boolean_value) == OX_COMPONENT_AVAILABLE;
+                                                          &boolean_value) == XR_SUCCESS;
             value = boolean_value ? XR_TRUE : XR_FALSE;
         } else if constexpr (std::is_same_v<StateType, XrActionStateFloat>) {
             if (!g_driver->get_input_state_float) {
@@ -540,7 +541,7 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
             }
 
             available = g_driver->get_input_state_float(predicted_time, user_path.c_str(), component_path.c_str(),
-                                                        &value) == OX_COMPONENT_AVAILABLE;
+                                                        &value) == XR_SUCCESS;
         } else if constexpr (std::is_same_v<StateType, XrActionStateVector2f>) {
             if (!g_driver->get_input_state_vector2f) {
                 continue;
@@ -548,7 +549,7 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
 
             XrVector2f vector_value{value.x, value.y};
             available = g_driver->get_input_state_vector2f(predicted_time, user_path.c_str(), component_path.c_str(),
-                                                           &vector_value) == OX_COMPONENT_AVAILABLE;
+                                                           &vector_value) == XR_SUCCESS;
             value = {vector_value.x, vector_value.y};
         } else {
             return XR_ERROR_VALIDATION_FAILURE;
@@ -905,22 +906,16 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetSystemProperties(XrInstance instance, XrSyst
         return XR_ERROR_HANDLE_INVALID;
     }
 
-    OxDeviceInfo device_info{};
-    OxDisplayProperties display_props{};
-    OxTrackingCapabilities tracking_caps{};
-    g_driver->get_device_info(&device_info);
-    g_driver->get_display_properties(&display_props);
-    g_driver->get_tracking_capabilities(&tracking_caps);
+    XrSystemProperties system_props{XR_TYPE_SYSTEM_PROPERTIES};
+    g_driver->get_system_properties(&system_props);
 
     properties->systemId = systemId;
-    safe_copy_string(properties->systemName, XR_MAX_SYSTEM_NAME_SIZE, device_info.name);
-    properties->graphicsProperties.maxSwapchainImageWidth =
-        std::max(display_props.display_width, display_props.recommended_width);
-    properties->graphicsProperties.maxSwapchainImageHeight =
-        std::max(display_props.display_height, display_props.recommended_height);
+    safe_copy_string(properties->systemName, XR_MAX_SYSTEM_NAME_SIZE, system_props.systemName);
+    properties->vendorId = system_props.vendorId;
+    properties->graphicsProperties.maxSwapchainImageWidth = system_props.graphicsProperties.maxSwapchainImageWidth;
+    properties->graphicsProperties.maxSwapchainImageHeight = system_props.graphicsProperties.maxSwapchainImageHeight;
     properties->graphicsProperties.maxLayerCount = kRuntimeMaxLayerCount;
-    properties->trackingProperties.orientationTracking = tracking_caps.has_orientation_tracking;
-    properties->trackingProperties.positionTracking = tracking_caps.has_position_tracking;
+    properties->trackingProperties = system_props.trackingProperties;
 
     return XR_SUCCESS;
 }
@@ -975,15 +970,15 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateViewConfigurationViews(XrInstance inst
             }
         }
 
-        OxDisplayProperties display_props{};
-        g_driver->get_display_properties(&display_props);
+        XrSystemProperties system_props{XR_TYPE_SYSTEM_PROPERTIES};
+        g_driver->get_system_properties(&system_props);
 
         for (uint32_t i = 0; i < kStereoViewCount && i < viewCapacityInput; i++) {
             views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
-            views[i].recommendedImageRectWidth = display_props.recommended_width;
-            views[i].maxImageRectWidth = std::max(display_props.display_width, display_props.recommended_width);
-            views[i].recommendedImageRectHeight = display_props.recommended_height;
-            views[i].maxImageRectHeight = std::max(display_props.display_height, display_props.recommended_height);
+            views[i].recommendedImageRectWidth = system_props.graphicsProperties.maxSwapchainImageWidth;
+            views[i].maxImageRectWidth = system_props.graphicsProperties.maxSwapchainImageWidth;
+            views[i].recommendedImageRectHeight = system_props.graphicsProperties.maxSwapchainImageHeight;
+            views[i].maxImageRectHeight = system_props.graphicsProperties.maxSwapchainImageHeight;
             views[i].recommendedSwapchainSampleCount = kRuntimeRecommendedSwapchainSampleCount;
             views[i].maxSwapchainSampleCount = kRuntimeMaxSwapchainSampleCount;
         }
@@ -1234,18 +1229,18 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace baseSpace, X
     }
 
     if (is_view_reference_space) {
-        XrPosef left_eye{};
-        XrPosef right_eye{};
-        g_driver->update_view_pose(time, 0, &left_eye);
-        g_driver->update_view_pose(time, 1, &right_eye);
+        XrView left_eye{XR_TYPE_VIEW};
+        XrView right_eye{XR_TYPE_VIEW};
+        g_driver->update_view(time, 0, &left_eye);
+        g_driver->update_view(time, 1, &right_eye);
 
         location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
                                   XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
-        location->pose.position.x = (left_eye.position.x + right_eye.position.x) * 0.5f;
-        location->pose.position.y = (left_eye.position.y + right_eye.position.y) * 0.5f;
-        location->pose.position.z = (left_eye.position.z + right_eye.position.z) * 0.5f;
-        location->pose.orientation = {left_eye.orientation.x, left_eye.orientation.y, left_eye.orientation.z,
-                                      left_eye.orientation.w};
+        location->pose.position.x = (left_eye.pose.position.x + right_eye.pose.position.x) * 0.5f;
+        location->pose.position.y = (left_eye.pose.position.y + right_eye.pose.position.y) * 0.5f;
+        location->pose.position.z = (left_eye.pose.position.z + right_eye.pose.position.z) * 0.5f;
+        location->pose.orientation = {left_eye.pose.orientation.x, left_eye.pose.orientation.y,
+                                      left_eye.pose.orientation.z, left_eye.pose.orientation.w};
         return XR_SUCCESS;
     }
 
@@ -1314,10 +1309,15 @@ XRAPI_ATTR XrResult XRAPI_CALL xrWaitFrame(XrSession session, const XrFrameWaitI
         }
     }
 
-    OxDisplayProperties display_props{};
-    g_driver->get_display_properties(&display_props);
-
-    frameState->predictedDisplayPeriod = ComputeDisplayPeriodNanos(display_props.refresh_rate);
+    {
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto it2 = g_sessions.find(session);
+        if (it2 != g_sessions.end()) {
+            frameState->predictedDisplayPeriod = it2->second.predicted_display_period;
+        } else {
+            frameState->predictedDisplayPeriod = kDefaultDisplayPeriodNanos;
+        }
+    }
     frameState->predictedDisplayTime = NowNanos() + frameState->predictedDisplayPeriod;
 
     {
@@ -1325,7 +1325,6 @@ XRAPI_ATTR XrResult XRAPI_CALL xrWaitFrame(XrSession session, const XrFrameWaitI
         auto it = g_sessions.find(session);
         if (it != g_sessions.end()) {
             it->second.last_predicted_display_time = frameState->predictedDisplayTime;
-            it->second.predicted_display_period = frameState->predictedDisplayPeriod;
         }
     }
 
@@ -1446,6 +1445,24 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
         }
     }
 
+    // Update frame timing estimate from consecutive xrEndFrame calls
+    {
+        const XrTime now = NowNanos();
+        std::lock_guard<std::mutex> lock(g_instance_mutex);
+        auto session_it2 = g_sessions.find(session);
+        if (session_it2 != g_sessions.end()) {
+            auto& sess = session_it2->second;
+            if (sess.last_end_frame_time != 0) {
+                const XrDuration measured = now - sess.last_end_frame_time;
+                // Guard against implausible values (< 1ms or > 500ms)
+                if (measured > 1000000LL && measured < 500000000LL) {
+                    sess.predicted_display_period = measured;
+                }
+            }
+            sess.last_end_frame_time = now;
+        }
+    }
+
     return XR_SUCCESS;
 }
 
@@ -1473,18 +1490,12 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession session, const XrViewLoca
         }
     }
 
-    OxDisplayProperties display_props{};
-    g_driver->get_display_properties(&display_props);
-
     if (views && viewCapacityInput >= kStereoViewCount) {
         for (uint32_t i = 0; i < kStereoViewCount && i < viewCapacityInput; i++) {
+            void* saved_next = views[i].next;
             views[i].type = XR_TYPE_VIEW;
-            views[i].next = nullptr;
-
-            XrPosef pose{};
-            g_driver->update_view_pose(viewLocateInfo->displayTime, i, &pose);
-            views[i].pose = pose;
-            views[i].fov = display_props.fov;
+            g_driver->update_view(viewLocateInfo->displayTime, i, &views[i]);
+            views[i].next = saved_next;
         }
     }
 

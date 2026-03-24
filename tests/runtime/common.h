@@ -30,20 +30,15 @@ class FakeDriverState {
         submitted_frames.clear();
         last_session_state = XR_SESSION_STATE_UNKNOWN;
 
-        std::memset(&device_info, 0, sizeof(device_info));
-        std::snprintf(device_info.name, sizeof(device_info.name), "%s", "Mock VR System");
-        std::snprintf(device_info.manufacturer, sizeof(device_info.manufacturer), "%s", "ox-runtime tests");
-        std::snprintf(device_info.serial, sizeof(device_info.serial), "%s", "TEST-0001");
-
-        std::memset(&display_properties, 0, sizeof(display_properties));
-        display_properties.display_width = 2048;
-        display_properties.display_height = 2048;
-        display_properties.recommended_width = 1832;
-        display_properties.recommended_height = 1920;
-        display_properties.refresh_rate = 90.0f;
-        display_properties.fov = {-0.8f, 0.8f, 0.8f, -0.8f};
-
-        tracking_capabilities = {1, 1};
+        std::memset(&system_properties, 0, sizeof(system_properties));
+        system_properties.type = XR_TYPE_SYSTEM_PROPERTIES;
+        system_properties.vendorId = 0x1234;
+        std::snprintf(system_properties.systemName, XR_MAX_SYSTEM_NAME_SIZE, "%s", "Mock VR System");
+        system_properties.graphicsProperties.maxSwapchainImageWidth = 2048;
+        system_properties.graphicsProperties.maxSwapchainImageHeight = 2048;
+        system_properties.graphicsProperties.maxLayerCount = 16;
+        system_properties.trackingProperties.orientationTracking = XR_TRUE;
+        system_properties.trackingProperties.positionTracking = XR_TRUE;
 
         view_poses[0] = {{0.0f, 0.0f, 0.0f, 1.0f}, {-0.032f, 1.6f, 0.0f}};
         view_poses[1] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.032f, 1.6f, 0.0f}};
@@ -55,10 +50,8 @@ class FakeDriverState {
         callbacks.initialize = &Initialize;
         callbacks.shutdown = &Shutdown;
         callbacks.is_device_connected = &IsDeviceConnected;
-        callbacks.get_device_info = &GetDeviceInfo;
-        callbacks.get_display_properties = &GetDisplayProperties;
-        callbacks.get_tracking_capabilities = &GetTrackingCapabilities;
-        callbacks.update_view_pose = &UpdateViewPose;
+        callbacks.get_system_properties = &GetSystemProperties;
+        callbacks.update_view = &UpdateView;
         callbacks.update_devices = &UpdateDevices;
         callbacks.get_input_state_boolean = &GetInputStateBoolean;
         callbacks.get_input_state_float = &GetInputStateFloat;
@@ -78,9 +71,7 @@ class FakeDriverState {
     };
 
     bool connected = true;
-    OxDeviceInfo device_info{};
-    OxDisplayProperties display_properties{};
-    OxTrackingCapabilities tracking_capabilities{};
+    XrSystemProperties system_properties{};
     std::array<XrPosef, 2> view_poses{};
     std::array<OxDeviceState, OX_MAX_DEVICES> devices{};
     uint32_t device_count = 0;
@@ -102,27 +93,18 @@ class FakeDriverState {
     static void Shutdown() {}
     static int IsDeviceConnected() { return active && active->connected ? 1 : 0; }
 
-    static void GetDeviceInfo(OxDeviceInfo* info) {
-        if (active && info) {
-            *info = active->device_info;
-        }
-    }
-
-    static void GetDisplayProperties(OxDisplayProperties* props) {
+    static void GetSystemProperties(XrSystemProperties* props) {
         if (active && props) {
-            *props = active->display_properties;
+            void* next = props->next;
+            *props = active->system_properties;
+            props->next = next;
         }
     }
 
-    static void GetTrackingCapabilities(OxTrackingCapabilities* caps) {
-        if (active && caps) {
-            *caps = active->tracking_capabilities;
-        }
-    }
-
-    static void UpdateViewPose(XrTime predicted_time, uint32_t eye_index, XrPosef* out_pose) {
-        if (active && out_pose && eye_index < active->view_poses.size()) {
-            *out_pose = active->view_poses[eye_index];
+    static void UpdateView(XrTime predicted_time, uint32_t eye_index, XrView* out_view) {
+        if (active && out_view && eye_index < active->view_poses.size()) {
+            out_view->pose = active->view_poses[eye_index];
+            out_view->fov = {-0.785398f, 0.785398f, 0.785398f, -0.785398f};
         }
     }
 
@@ -141,49 +123,49 @@ class FakeDriverState {
         }
     }
 
-    static OxComponentResult GetInputStateBoolean(XrTime predicted_time, const char* user_path,
-                                                  const char* component_path, uint32_t* out_value) {
+    static XrResult GetInputStateBoolean(XrTime predicted_time, const char* user_path,
+                                          const char* component_path, XrBool32* out_value) {
         if (!active || !out_value) {
-            return OX_COMPONENT_UNAVAILABLE;
+            return XR_ERROR_PATH_UNSUPPORTED;
         }
 
         const auto it = active->bool_inputs.find(InputKey(user_path, component_path));
         if (it == active->bool_inputs.end()) {
-            return OX_COMPONENT_UNAVAILABLE;
+            return XR_ERROR_PATH_UNSUPPORTED;
         }
 
-        *out_value = it->second;
-        return OX_COMPONENT_AVAILABLE;
+        *out_value = it->second ? XR_TRUE : XR_FALSE;
+        return XR_SUCCESS;
     }
 
-    static OxComponentResult GetInputStateFloat(XrTime predicted_time, const char* user_path,
-                                                const char* component_path, float* out_value) {
+    static XrResult GetInputStateFloat(XrTime predicted_time, const char* user_path,
+                                        const char* component_path, float* out_value) {
         if (!active || !out_value) {
-            return OX_COMPONENT_UNAVAILABLE;
+            return XR_ERROR_PATH_UNSUPPORTED;
         }
 
         const auto it = active->float_inputs.find(InputKey(user_path, component_path));
         if (it == active->float_inputs.end()) {
-            return OX_COMPONENT_UNAVAILABLE;
+            return XR_ERROR_PATH_UNSUPPORTED;
         }
 
         *out_value = it->second;
-        return OX_COMPONENT_AVAILABLE;
+        return XR_SUCCESS;
     }
 
-    static OxComponentResult GetInputStateVector2f(XrTime predicted_time, const char* user_path,
-                                                   const char* component_path, XrVector2f* out_value) {
+    static XrResult GetInputStateVector2f(XrTime predicted_time, const char* user_path,
+                                           const char* component_path, XrVector2f* out_value) {
         if (!active || !out_value) {
-            return OX_COMPONENT_UNAVAILABLE;
+            return XR_ERROR_PATH_UNSUPPORTED;
         }
 
         const auto it = active->vector2_inputs.find(InputKey(user_path, component_path));
         if (it == active->vector2_inputs.end()) {
-            return OX_COMPONENT_UNAVAILABLE;
+            return XR_ERROR_PATH_UNSUPPORTED;
         }
 
         *out_value = it->second;
-        return OX_COMPONENT_AVAILABLE;
+        return XR_SUCCESS;
     }
 
     static uint32_t GetInteractionProfiles(const char** profiles, uint32_t max_profiles) {

@@ -7,7 +7,8 @@
 extern "C" {
 #endif
 
-#define OX_DRIVER_API_VERSION 1
+#define OX_MAKE_VERSION(major, minor) (((major) << 16) | (minor))
+#define OX_DRIVER_API_VERSION OX_MAKE_VERSION(1, 0)
 
 // Platform-specific export macro
 #ifdef _WIN32
@@ -19,31 +20,6 @@ extern "C" {
 // Forward declarations
 typedef struct OxDriverCallbacks OxDriverCallbacks;
 
-// Device information
-typedef struct {
-    char name[256];          // e.g., "Dummy VR Headset"
-    char manufacturer[256];  // e.g., "ox runtime"
-    char serial[256];        // e.g., "DUMMY-12345"
-    uint32_t vendor_id;
-    uint32_t product_id;
-} OxDeviceInfo;
-
-// Display capabilities
-typedef struct {
-    uint32_t display_width;       // Per-eye width in pixels
-    uint32_t display_height;      // Per-eye height in pixels
-    uint32_t recommended_width;   // Recommended render target width
-    uint32_t recommended_height;  // Recommended render target height
-    float refresh_rate;           // Hz
-    XrFovf fov;                   // Field of view
-} OxDisplayProperties;
-
-// Tracking capabilities
-typedef struct {
-    uint32_t has_position_tracking;
-    uint32_t has_orientation_tracking;
-} OxTrackingCapabilities;
-
 // Device information (controllers, trackers, etc.)
 #define OX_MAX_DEVICES 16
 
@@ -52,12 +28,6 @@ typedef struct {
     XrPosef pose;
     uint32_t is_active;  // 1 if device is connected/tracked, 0 otherwise
 } OxDeviceState;
-
-// Component state result codes
-typedef enum {
-    OX_COMPONENT_UNAVAILABLE = 0,  // Component doesn't exist on this controller
-    OX_COMPONENT_AVAILABLE = 1,    // Component exists and state is valid
-} OxComponentResult;
 
 // Driver callbacks - implement these in your driver
 struct OxDriverCallbacks {
@@ -80,25 +50,20 @@ struct OxDriverCallbacks {
     // Return: 1 if connected, 0 if not
     int (*is_device_connected)(void);
 
-    // Get device information (name, manufacturer, serial, etc.)
-    void (*get_device_info)(OxDeviceInfo* info);
-
-    // ========== Display Properties ==========
-
-    // Get display specifications
-    void (*get_display_properties)(OxDisplayProperties* props);
-
-    // Get tracking capabilities
-    void (*get_tracking_capabilities)(OxTrackingCapabilities* caps);
+    // Get system properties (name, vendor, graphics limits, tracking capabilities)
+    // The runtime pre-initializes properties with {XR_TYPE_SYSTEM_PROPERTIES}.
+    // Fill in: systemName, vendorId, graphicsProperties (maxSwapchainImageWidth/Height),
+    // and trackingProperties. The runtime will set systemId and maxLayerCount.
+    void (*get_system_properties)(XrSystemProperties* properties);
 
     // ========== Hot Path - Called Every Frame ==========
 
-    // Update per-eye view poses for rendering
+    // Update per-eye view for rendering
     // predicted_time: OpenXR predicted display time
     // eye_index: 0 = left, 1 = right
-    // out_pose: write the eye pose here (typically HMD pose + IPD offset)
+    // out_view: write the eye pose and field-of-view here
     // Note: HMD tracking pose should be reported via update_devices() as device[0] with user_path="/user/head"
-    void (*update_view_pose)(XrTime predicted_time, uint32_t eye_index, XrPosef* out_pose);
+    void (*update_view)(XrTime predicted_time, uint32_t eye_index, XrView* out_view);
 
     // ========== Devices (Controllers, Trackers, etc.) ==========
 
@@ -113,31 +78,31 @@ struct OxDriverCallbacks {
     // predicted_time: OpenXR predicted display time
     // user_path: OpenXR user path (e.g., "/user/hand/left")
     // component_path: OpenXR component path (e.g., "/input/trigger/click", "/input/a/touch")
-    // out_value: write the boolean value here (0 or 1)
-    // Returns: OX_COMPONENT_AVAILABLE if component exists, OX_COMPONENT_UNAVAILABLE otherwise
+    // out_value: write the boolean value here (XR_TRUE or XR_FALSE)
+    // Returns: XR_SUCCESS if component exists and value is valid, XR_ERROR_PATH_UNSUPPORTED otherwise
     // This callback is optional - set to NULL if devices are not supported
-    OxComponentResult (*get_input_state_boolean)(XrTime predicted_time, const char* user_path,
-                                                 const char* component_path, uint32_t* out_value);
+    XrResult (*get_input_state_boolean)(XrTime predicted_time, const char* user_path,
+                                        const char* component_path, XrBool32* out_value);
 
     // Get float input state (for /value, /force components)
     // predicted_time: OpenXR predicted display time
     // user_path: OpenXR user path (e.g., "/user/hand/left")
     // component_path: OpenXR component path (e.g., "/input/trigger/value", "/input/squeeze/value")
     // out_value: write the float value here (typically 0.0 to 1.0)
-    // Returns: OX_COMPONENT_AVAILABLE if component exists, OX_COMPONENT_UNAVAILABLE otherwise
+    // Returns: XR_SUCCESS if component exists and value is valid, XR_ERROR_PATH_UNSUPPORTED otherwise
     // This callback is optional - set to NULL if devices are not supported
-    OxComponentResult (*get_input_state_float)(XrTime predicted_time, const char* user_path, const char* component_path,
-                                               float* out_value);
+    XrResult (*get_input_state_float)(XrTime predicted_time, const char* user_path, const char* component_path,
+                                      float* out_value);
 
     // Get Vector2f input state (for thumbstick/trackpad)
     // predicted_time: OpenXR predicted display time
     // user_path: OpenXR user path (e.g., "/user/hand/left")
     // component_path: OpenXR component path (e.g., "/input/thumbstick", "/input/trackpad")
     // out_value: write the Vector2f value here ({x, y})
-    // Returns: OX_COMPONENT_AVAILABLE if component exists, OX_COMPONENT_UNAVAILABLE otherwise
+    // Returns: XR_SUCCESS if component exists and value is valid, XR_ERROR_PATH_UNSUPPORTED otherwise
     // This callback is optional - set to NULL if devices are not supported
-    OxComponentResult (*get_input_state_vector2f)(XrTime predicted_time, const char* user_path,
-                                                  const char* component_path, XrVector2f* out_value);
+    XrResult (*get_input_state_vector2f)(XrTime predicted_time, const char* user_path,
+                                         const char* component_path, XrVector2f* out_value);
 
     // ========== Interaction Profiles (Optional) ==========
 
