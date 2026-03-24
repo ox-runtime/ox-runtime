@@ -253,10 +253,6 @@ void UnloadDriver() {
     g_driver_library.reset();
 }
 
-OxSessionState ToOxSessionState(XrSessionState state) {
-    return static_cast<OxSessionState>(static_cast<uint32_t>(state));
-}
-
 XrDuration ComputeDisplayPeriodNanos(float refresh_rate_hz) {
     if (refresh_rate_hz <= 0.0f) {
         return kDefaultDisplayPeriodNanos;
@@ -303,7 +299,7 @@ void QueueSessionStateChangeLocked(XrSession session, XrSessionState state) {
 
 void NotifyDriverSessionState(XrSessionState state) {
     if (g_driver && g_driver->on_session_state_changed) {
-        g_driver->on_session_state_changed(ToOxSessionState(state));
+        g_driver->on_session_state_changed(state);
     }
 }
 
@@ -550,7 +546,7 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
                 continue;
             }
 
-            OxVector2f vector_value{value.x, value.y};
+            XrVector2f vector_value{value.x, value.y};
             available = g_driver->get_input_state_vector2f(predicted_time, user_path.c_str(), component_path.c_str(),
                                                            &vector_value) == OX_COMPONENT_AVAILABLE;
             value = {vector_value.x, vector_value.y};
@@ -1238,8 +1234,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace baseSpace, X
     }
 
     if (is_view_reference_space) {
-        OxPose left_eye{};
-        OxPose right_eye{};
+        XrPosef left_eye{};
+        XrPosef right_eye{};
         g_driver->update_view_pose(time, 0, &left_eye);
         g_driver->update_view_pose(time, 1, &right_eye);
 
@@ -1436,7 +1432,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
 
                     if (copySuccess) {
                         if (g_driver->submit_frame_pixels) {
-                            g_driver->submit_frame_pixels(viewIdx, swapchainData.width, swapchainData.height,
+                            g_driver->submit_frame_pixels(frameEndInfo->displayTime, viewIdx, swapchainData.width,
+                                                          swapchainData.height,
                                                           static_cast<uint32_t>(swapchainData.format),
                                                           submitBuffer.data(), static_cast<uint32_t>(destSize));
                         }
@@ -1484,15 +1481,10 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession session, const XrViewLoca
             views[i].type = XR_TYPE_VIEW;
             views[i].next = nullptr;
 
-            OxPose pose{};
+            XrPosef pose{};
             g_driver->update_view_pose(viewLocateInfo->displayTime, i, &pose);
-            views[i].pose.position = {pose.position.x, pose.position.y, pose.position.z};
-            views[i].pose.orientation = {pose.orientation.x, pose.orientation.y, pose.orientation.z,
-                                         pose.orientation.w};
-            views[i].fov.angleLeft = display_props.fov.angle_left;
-            views[i].fov.angleRight = display_props.fov.angle_right;
-            views[i].fov.angleUp = display_props.fov.angle_up;
-            views[i].fov.angleDown = display_props.fov.angle_down;
+            views[i].pose = pose;
+            views[i].fov = display_props.fov;
         }
     }
 

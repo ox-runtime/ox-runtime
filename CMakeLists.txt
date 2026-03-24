@@ -63,6 +63,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 enable_testing()
 
+add_subdirectory(include)
+
 if(APPLE)
     option(OX_OPENGL "Enable OpenGL graphics API support" ON)
     option(OX_VULKAN "Enable Vulkan graphics API support" OFF)
@@ -72,15 +74,6 @@ else()
     option(OX_VULKAN "Enable Vulkan graphics API support" ON)
     option(OX_METAL "Enable Metal graphics API support on macOS" OFF)
 endif()
-
-FetchContent_Declare(
-    openxr
-    GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK.git
-    GIT_TAG release-1.1.54
-)
-FetchContent_MakeAvailable(openxr)
-
-set(OPENXR_INCLUDE_DIR ${openxr_SOURCE_DIR}/include)
 
 set(OX_RUNTIME_SOURCES
     src/runtime.cpp
@@ -121,7 +114,6 @@ endfunction()
 add_library(ox_runtime SHARED ${OX_RUNTIME_SOURCES})
 
 target_include_directories(ox_runtime PRIVATE
-    ${OPENXR_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
@@ -134,7 +126,7 @@ target_compile_definitions(ox_runtime PRIVATE
 
 configure_graphics(ox_runtime)
 
-target_link_libraries(ox_runtime PRIVATE spdlog::spdlog dylib whereami)
+target_link_libraries(ox_runtime PRIVATE ox_driver_api spdlog::spdlog dylib whereami)
 
 set_target_properties(ox_runtime PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin

@@ -28,7 +28,7 @@ class FakeDriverState {
         float_inputs.clear();
         vector2_inputs.clear();
         submitted_frames.clear();
-        last_session_state = OX_SESSION_STATE_UNKNOWN;
+        last_session_state = XR_SESSION_STATE_UNKNOWN;
 
         std::memset(&device_info, 0, sizeof(device_info));
         std::snprintf(device_info.name, sizeof(device_info.name), "%s", "Mock VR System");
@@ -45,8 +45,8 @@ class FakeDriverState {
 
         tracking_capabilities = {1, 1};
 
-        view_poses[0] = {{-0.032f, 1.6f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
-        view_poses[1] = {{0.032f, 1.6f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
+        view_poses[0] = {{0.0f, 0.0f, 0.0f, 1.0f}, {-0.032f, 1.6f, 0.0f}};
+        view_poses[1] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.032f, 1.6f, 0.0f}};
         device_count = 0;
     }
 
@@ -81,15 +81,15 @@ class FakeDriverState {
     OxDeviceInfo device_info{};
     OxDisplayProperties display_properties{};
     OxTrackingCapabilities tracking_capabilities{};
-    std::array<OxPose, 2> view_poses{};
+    std::array<XrPosef, 2> view_poses{};
     std::array<OxDeviceState, OX_MAX_DEVICES> devices{};
     uint32_t device_count = 0;
     std::vector<std::string> interaction_profiles;
     std::unordered_map<std::string, uint32_t> bool_inputs;
     std::unordered_map<std::string, float> float_inputs;
-    std::unordered_map<std::string, OxVector2f> vector2_inputs;
+    std::unordered_map<std::string, XrVector2f> vector2_inputs;
     std::vector<SubmittedFrame> submitted_frames;
-    OxSessionState last_session_state = OX_SESSION_STATE_UNKNOWN;
+    XrSessionState last_session_state = XR_SESSION_STATE_UNKNOWN;
 
     static inline FakeDriverState* active = nullptr;
 
@@ -120,13 +120,13 @@ class FakeDriverState {
         }
     }
 
-    static void UpdateViewPose(int64_t predicted_time, uint32_t eye_index, OxPose* out_pose) {
+    static void UpdateViewPose(XrTime predicted_time, uint32_t eye_index, XrPosef* out_pose) {
         if (active && out_pose && eye_index < active->view_poses.size()) {
             *out_pose = active->view_poses[eye_index];
         }
     }
 
-    static void UpdateDevices(int64_t predicted_time, OxDeviceState* out_states, uint32_t* out_count) {
+    static void UpdateDevices(XrTime predicted_time, OxDeviceState* out_states, uint32_t* out_count) {
         if (!active || !out_count) {
             return;
         }
@@ -141,7 +141,7 @@ class FakeDriverState {
         }
     }
 
-    static OxComponentResult GetInputStateBoolean(int64_t predicted_time, const char* user_path,
+    static OxComponentResult GetInputStateBoolean(XrTime predicted_time, const char* user_path,
                                                   const char* component_path, uint32_t* out_value) {
         if (!active || !out_value) {
             return OX_COMPONENT_UNAVAILABLE;
@@ -156,7 +156,7 @@ class FakeDriverState {
         return OX_COMPONENT_AVAILABLE;
     }
 
-    static OxComponentResult GetInputStateFloat(int64_t predicted_time, const char* user_path,
+    static OxComponentResult GetInputStateFloat(XrTime predicted_time, const char* user_path,
                                                 const char* component_path, float* out_value) {
         if (!active || !out_value) {
             return OX_COMPONENT_UNAVAILABLE;
@@ -171,8 +171,8 @@ class FakeDriverState {
         return OX_COMPONENT_AVAILABLE;
     }
 
-    static OxComponentResult GetInputStateVector2f(int64_t predicted_time, const char* user_path,
-                                                   const char* component_path, OxVector2f* out_value) {
+    static OxComponentResult GetInputStateVector2f(XrTime predicted_time, const char* user_path,
+                                                   const char* component_path, XrVector2f* out_value) {
         if (!active || !out_value) {
             return OX_COMPONENT_UNAVAILABLE;
         }
@@ -198,14 +198,14 @@ class FakeDriverState {
         return count;
     }
 
-    static void OnSessionStateChanged(OxSessionState new_state) {
+    static void OnSessionStateChanged(XrSessionState new_state) {
         if (active) {
             active->last_session_state = new_state;
         }
     }
 
-    static void SubmitFramePixels(uint32_t eye_index, uint32_t width, uint32_t height, uint32_t format,
-                                  const void* pixel_data, uint32_t data_size) {
+    static void SubmitFramePixels(XrTime frame_time, uint32_t eye_index, uint32_t width, uint32_t height,
+                                  uint32_t format, const void* pixel_data, uint32_t data_size) {
         if (active) {
             active->submitted_frames.push_back({eye_index, width, height, format, data_size});
         }

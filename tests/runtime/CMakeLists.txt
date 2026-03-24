@@ -14,7 +14,6 @@ endif()
 add_executable(runtime_tests ${RUNTIME_TEST_SOURCES})
 
 target_include_directories(runtime_tests PRIVATE
-    ${OPENXR_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -29,6 +28,7 @@ target_compile_definitions(runtime_tests PRIVATE
 )
 
 target_link_libraries(runtime_tests PRIVATE
+    ox_driver_api
     GTest::gtest_main
     spdlog::spdlog
     dylib
