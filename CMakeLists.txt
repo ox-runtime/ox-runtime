@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.27)
 
-project(ox-runtime VERSION 0.1.0 LANGUAGES C CXX)
+project(ox-runtime VERSION 0.2.0 LANGUAGES C CXX)
 
 if(WIN32 AND MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
