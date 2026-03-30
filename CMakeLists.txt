@@ -140,6 +140,12 @@ set_target_properties(ox_runtime PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/lib
 )
 
+# Hide non-exported C++ symbols by default so only explicit API exports leave the shared library.
+set_target_properties(ox_runtime PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
 file(GENERATE
     OUTPUT "${CMAKE_BINARY_DIR}/bin/ox_runtime.json"
     INPUT "${CMAKE_CURRENT_SOURCE_DIR}/ox_runtime.json.in"

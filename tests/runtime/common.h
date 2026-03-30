@@ -76,7 +76,7 @@ class FakeDriverState {
     std::array<OxDeviceState, OX_MAX_DEVICES> devices{};
     uint32_t device_count = 0;
     std::vector<std::string> interaction_profiles;
-    std::unordered_map<std::string, uint32_t> bool_inputs;
+    std::unordered_map<std::string, XrBool32> bool_inputs;
     std::unordered_map<std::string, float> float_inputs;
     std::unordered_map<std::string, XrVector2f> vector2_inputs;
     std::vector<SubmittedFrame> submitted_frames;
@@ -123,8 +123,8 @@ class FakeDriverState {
         }
     }
 
-    static XrResult GetInputStateBoolean(XrTime predicted_time, const char* user_path,
-                                          const char* component_path, XrBool32* out_value) {
+    static XrResult GetInputStateBoolean(XrTime predicted_time, const char* user_path, const char* component_path,
+                                         XrBool32* out_value) {
         if (!active || !out_value) {
             return XR_ERROR_PATH_UNSUPPORTED;
         }
@@ -138,8 +138,8 @@ class FakeDriverState {
         return XR_SUCCESS;
     }
 
-    static XrResult GetInputStateFloat(XrTime predicted_time, const char* user_path,
-                                        const char* component_path, float* out_value) {
+    static XrResult GetInputStateFloat(XrTime predicted_time, const char* user_path, const char* component_path,
+                                       float* out_value) {
         if (!active || !out_value) {
             return XR_ERROR_PATH_UNSUPPORTED;
         }
@@ -153,8 +153,8 @@ class FakeDriverState {
         return XR_SUCCESS;
     }
 
-    static XrResult GetInputStateVector2f(XrTime predicted_time, const char* user_path,
-                                           const char* component_path, XrVector2f* out_value) {
+    static XrResult GetInputStateVector2f(XrTime predicted_time, const char* user_path, const char* component_path,
+                                          XrVector2f* out_value) {
         if (!active || !out_value) {
             return XR_ERROR_PATH_UNSUPPORTED;
         }

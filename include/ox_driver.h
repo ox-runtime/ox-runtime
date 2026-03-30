@@ -17,16 +17,13 @@ extern "C" {
 #define OX_DRIVER_EXPORT __attribute__((visibility("default")))
 #endif
 
-// Forward declarations
-typedef struct OxDriverCallbacks OxDriverCallbacks;
-
 // Device information (controllers, trackers, etc.)
 #define OX_MAX_DEVICES 16
 
 typedef struct {
     char user_path[256];  // OpenXR user path: "/user/hand/left", "/user/vive_tracker_htcx/role/waist", etc.
     XrPosef pose;
-    uint32_t is_active;  // 1 if device is connected/tracked, 0 otherwise
+    XrBool32 is_active;  // XR_TRUE if device is connected/tracked, XR_FALSE otherwise
 } OxDeviceState;
 
 // Driver callbacks - implement these in your driver
@@ -81,8 +78,8 @@ struct OxDriverCallbacks {
     // out_value: write the boolean value here (XR_TRUE or XR_FALSE)
     // Returns: XR_SUCCESS if component exists and value is valid, XR_ERROR_PATH_UNSUPPORTED otherwise
     // This callback is optional - set to NULL if devices are not supported
-    XrResult (*get_input_state_boolean)(XrTime predicted_time, const char* user_path,
-                                        const char* component_path, XrBool32* out_value);
+    XrResult (*get_input_state_boolean)(XrTime predicted_time, const char* user_path, const char* component_path,
+                                        XrBool32* out_value);
 
     // Get float input state (for /value, /force components)
     // predicted_time: OpenXR predicted display time
@@ -101,8 +98,8 @@ struct OxDriverCallbacks {
     // out_value: write the Vector2f value here ({x, y})
     // Returns: XR_SUCCESS if component exists and value is valid, XR_ERROR_PATH_UNSUPPORTED otherwise
     // This callback is optional - set to NULL if devices are not supported
-    XrResult (*get_input_state_vector2f)(XrTime predicted_time, const char* user_path,
-                                         const char* component_path, XrVector2f* out_value);
+    XrResult (*get_input_state_vector2f)(XrTime predicted_time, const char* user_path, const char* component_path,
+                                         XrVector2f* out_value);
 
     // ========== Interaction Profiles (Optional) ==========
 
@@ -141,7 +138,7 @@ struct OxDriverCallbacks {
 // The runtime calls this to register the driver's callbacks
 // callbacks: pointer to struct that runtime has allocated
 // Return: 1 on success, 0 on failure
-typedef int (*OxDriverRegisterFunc)(OxDriverCallbacks* callbacks);
+typedef int (*OxDriverRegisterFunc)(struct OxDriverCallbacks* callbacks);
 
 #ifdef __cplusplus
 }
