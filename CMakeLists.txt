@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.27)
 
 project(ox-runtime VERSION 0.2.0 LANGUAGES C CXX)
 
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 if(WIN32 AND MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
@@ -81,7 +85,7 @@ set(OX_RUNTIME_SOURCES
 
 if(APPLE AND OX_METAL)
     set_source_files_properties(src/runtime.cpp PROPERTIES
-        COMPILE_FLAGS "-x objective-c++"
+        LANGUAGE OBJCXX
     )
 endif()
 
