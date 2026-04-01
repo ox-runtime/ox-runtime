@@ -141,13 +141,20 @@ void* GetDefaultDevice() {
     return (__bridge void*)device;
 }
 
-bool CopyTextureToMemory(void* texture, uint32_t width, uint32_t height, void* dest, size_t destSize) {
-    if (!texture || !dest) {
+bool CopyTextureToMemory(void* commandQueue, void* texture, uint32_t width, uint32_t height, void* dest,
+                         size_t destSize) {
+    if (!commandQueue || !texture || !dest) {
         spdlog::error("CopyTextureToMemory: Invalid parameters");
         return false;
     }
 
+    id<MTLCommandQueue> mtlCommandQueue = (__bridge id<MTLCommandQueue>)commandQueue;
     id<MTLTexture> mtlTexture = (__bridge id<MTLTexture>)texture;
+    id<MTLDevice> device = mtlCommandQueue.device;
+    if (!device) {
+        spdlog::error("CopyTextureToMemory: Invalid Metal command queue");
+        return false;
+    }
 
     // Verify we have enough space (RGBA8)
     size_t requiredSize = width * height * 4;
@@ -160,21 +167,64 @@ bool CopyTextureToMemory(void* texture, uint32_t width, uint32_t height, void* d
     NSUInteger bytesPerRow = width * 4;
     NSUInteger alignedBytesPerRow = (bytesPerRow + 255) & ~255;  // Align to 256 bytes
 
-    // Read the texture data
+    id<MTLCommandBuffer> commandBuffer = [mtlCommandQueue commandBuffer];
+    if (!commandBuffer) {
+        spdlog::error("CopyTextureToMemory: Failed to create command buffer");
+        return false;
+    }
+
+    const NSUInteger stagingSize = alignedBytesPerRow * height;
+    id<MTLBuffer> stagingBuffer = [device newBufferWithLength:stagingSize options:MTLResourceStorageModeShared];
+    if (!stagingBuffer) {
+        spdlog::error("CopyTextureToMemory: Failed to create staging buffer");
+        return false;
+    }
+
+    id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
+    if (!blitEncoder) {
+        spdlog::error("CopyTextureToMemory: Failed to create blit encoder");
+        return false;
+    }
+
     MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+    const MTLOrigin origin = region.origin;
+    const MTLSize size = MTLSizeMake(region.size.width, region.size.height, 1);
+    [blitEncoder copyFromTexture:mtlTexture
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:origin
+                      sourceSize:size
+                        toBuffer:stagingBuffer
+               destinationOffset:0
+          destinationBytesPerRow:alignedBytesPerRow
+        destinationBytesPerImage:stagingSize];
+    [blitEncoder endEncoding];
+
+    [commandBuffer commit];
+    [commandBuffer waitUntilCompleted];
+
+    if (@available(macOS 10.13, iOS 11.0, *)) {
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+            spdlog::error("CopyTextureToMemory: Blit command buffer failed with status {}",
+                          static_cast<int>(commandBuffer.status));
+            return false;
+        }
+    }
+
+    const uint8_t* sourceBytes = static_cast<const uint8_t*>(stagingBuffer.contents);
+    if (!sourceBytes) {
+        spdlog::error("CopyTextureToMemory: Staging buffer has no contents");
+        return false;
+    }
 
     // If alignment matches, copy directly
     if (alignedBytesPerRow == bytesPerRow) {
-        [mtlTexture getBytes:dest bytesPerRow:bytesPerRow fromRegion:region mipmapLevel:0];
+        memcpy(dest, sourceBytes, requiredSize);
     } else {
-        // Need temporary buffer for aligned read
-        std::vector<uint8_t> tempBuffer(alignedBytesPerRow * height);
-        [mtlTexture getBytes:tempBuffer.data() bytesPerRow:alignedBytesPerRow fromRegion:region mipmapLevel:0];
-
         // Copy to destination, removing padding
         uint8_t* dst = static_cast<uint8_t*>(dest);
         for (uint32_t y = 0; y < height; y++) {
-            memcpy(dst + y * bytesPerRow, tempBuffer.data() + y * alignedBytesPerRow, bytesPerRow);
+            memcpy(dst + y * bytesPerRow, sourceBytes + y * alignedBytesPerRow, bytesPerRow);
         }
     }
 

@@ -1418,9 +1418,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
 #ifdef OX_METAL
                         case GraphicsAPI::Metal:
                             if (imageIdx < swapchainData.metalTextures.size()) {
-                                copySuccess = metal::CopyTextureToMemory(swapchainData.metalTextures[imageIdx],
-                                                                         swapchainData.width, swapchainData.height,
-                                                                         submitBuffer.data(), destSize);
+                                copySuccess = metal::CopyTextureToMemory(
+                                    swapchainData.metalCommandQueue, swapchainData.metalTextures[imageIdx],
+                                    swapchainData.width, swapchainData.height, submitBuffer.data(), destSize);
                             }
                             break;
 #endif
