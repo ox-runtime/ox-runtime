@@ -7,7 +7,7 @@ set(RUNTIME_TEST_SOURCES
 if(APPLE AND OX_METAL)
     list(APPEND RUNTIME_TEST_SOURCES test_metal.mm)
     set_source_files_properties(../../src/runtime.cpp PROPERTIES
-        COMPILE_FLAGS "-x objective-c++"
+        LANGUAGE OBJCXX
     )
 endif()
 
