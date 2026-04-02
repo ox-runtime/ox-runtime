@@ -122,12 +122,6 @@ target_include_directories(ox_runtime PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_definitions(ox_runtime PRIVATE
-    OX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
-    OX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
-    OX_VERSION_PATCH=${PROJECT_VERSION_PATCH}
-)
-
 configure_graphics(ox_runtime)
 
 target_link_libraries(ox_runtime PRIVATE ox_driver_api spdlog::spdlog dylib whereami)
