@@ -2,8 +2,10 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -70,6 +72,22 @@ bool CopyTextureToMemory(uint32_t textureId, uint32_t width, uint32_t height, st
     }
 
     return true;
+}
+
+void NormalizeFramePixels(std::byte* pixels, uint32_t width, uint32_t height) {
+    if (!pixels || width == 0 || height <= 1) {
+        return;
+    }
+
+    const size_t row_bytes = static_cast<size_t>(width) * 4;
+    std::vector<std::byte> scratch(row_bytes);
+    for (uint32_t top = 0, bottom = height - 1; top < bottom; ++top, --bottom) {
+        std::byte* top_row = pixels + static_cast<size_t>(top) * row_bytes;
+        std::byte* bottom_row = pixels + static_cast<size_t>(bottom) * row_bytes;
+        std::memcpy(scratch.data(), top_row, row_bytes);
+        std::memcpy(top_row, bottom_row, row_bytes);
+        std::memcpy(bottom_row, scratch.data(), row_bytes);
+    }
 }
 
 std::vector<int64_t> GetSupportedFormats() {

@@ -307,6 +307,12 @@ bool CopyTextureToMemory(void* commandQueue, void* texture, uint32_t width, uint
     }
 }
 
+void NormalizeFramePixels(std::byte* pixels, uint32_t width, uint32_t height) {
+    (void)pixels;
+    (void)width;
+    (void)height;
+}
+
 // Detect Metal graphics binding from session create info
 bool DetectGraphicsBinding(const void* next, void** outBinding) {
     while (next) {

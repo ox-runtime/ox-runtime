@@ -291,6 +291,12 @@ bool CopyImageToMemory(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue
     return true;
 }
 
+void NormalizeFramePixels(std::byte* pixels, uint32_t width, uint32_t height) {
+    (void)pixels;
+    (void)width;
+    (void)height;
+}
+
 std::vector<int64_t> GetSupportedFormats() {
     // Report only sRGB formats so applications apply sRGB color management.
     return {

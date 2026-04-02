@@ -1418,6 +1418,28 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
                     }
 
                     if (copySuccess) {
+                        switch (swapchainData.graphicsAPI) {
+#ifdef OX_OPENGL
+                            case GraphicsAPI::OpenGL:
+                                opengl::NormalizeFramePixels(submitBuffer.data(), swapchainData.width,
+                                                             swapchainData.height);
+                                break;
+#endif
+#ifdef OX_VULKAN
+                            case GraphicsAPI::Vulkan:
+                                vulkan::NormalizeFramePixels(submitBuffer.data(), swapchainData.width,
+                                                             swapchainData.height);
+                                break;
+#endif
+#ifdef OX_METAL
+                            case GraphicsAPI::Metal:
+                                metal::NormalizeFramePixels(submitBuffer.data(), swapchainData.width,
+                                                            swapchainData.height);
+                                break;
+#endif
+                            default:
+                                break;
+                        }
                         if (g_driver->submit_frame_pixels) {
                             g_driver->submit_frame_pixels(frameEndInfo->displayTime, viewIdx, swapchainData.width,
                                                           swapchainData.height,
