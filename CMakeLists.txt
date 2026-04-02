@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.27)
 
-project(ox-runtime VERSION 0.2.3 LANGUAGES C CXX)
+project(ox-runtime LANGUAGES C CXX)
 
 if(APPLE)
     enable_language(OBJCXX)
