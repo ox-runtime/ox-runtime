@@ -126,21 +126,6 @@ constexpr uint32_t kRuntimeMaxSwapchainSampleCount = 1;
 constexpr uint32_t kRuntimeRecommendedSwapchainSampleCount = 1;
 constexpr XrDuration kDefaultDisplayPeriodNanos = 11111111;
 constexpr char kDefaultInteractionProfile[] = "/interaction_profiles/khr/simple_controller";
-#ifdef OX_VERSION_MAJOR
-constexpr uint32_t kRuntimeVersionMajor = OX_VERSION_MAJOR;
-#else
-constexpr uint32_t kRuntimeVersionMajor = 0;
-#endif
-#ifdef OX_VERSION_MINOR
-constexpr uint32_t kRuntimeVersionMinor = OX_VERSION_MINOR;
-#else
-constexpr uint32_t kRuntimeVersionMinor = 0;
-#endif
-#ifdef OX_VERSION_PATCH
-constexpr uint32_t kRuntimeVersionPatch = OX_VERSION_PATCH;
-#else
-constexpr uint32_t kRuntimeVersionPatch = 0;
-#endif
 
 struct SessionGraphicsBinding {
     void* bindingData = nullptr;
@@ -695,8 +680,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProperties(XrInstance instance, XrIn
         return XR_ERROR_HANDLE_INVALID;
     }
 
-    instanceProperties->runtimeVersion =
-        XR_MAKE_VERSION(kRuntimeVersionMajor, kRuntimeVersionMinor, kRuntimeVersionPatch);
+#if defined(OX_VERSION_MAJOR) && defined(OX_VERSION_MINOR) && defined(OX_VERSION_PATCH)
+    instanceProperties->runtimeVersion = XR_MAKE_VERSION(OX_VERSION_MAJOR, OX_VERSION_MINOR, OX_VERSION_PATCH);
+#else
+    instanceProperties->runtimeVersion = XR_MAKE_VERSION(0, 0, 0);
+#endif
     safe_copy_string(instanceProperties->runtimeName, XR_MAX_RUNTIME_NAME_SIZE, "ox-runtime");
 
     return XR_SUCCESS;
