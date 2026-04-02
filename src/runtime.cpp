@@ -224,7 +224,7 @@ bool LoadConfiguredDriver() {
     } else if (GetEnvVar("OX_USE_SIMULATOR") == "1") {
         lib_path = ModuleDirectory() / "drivers/ox-simulator/ox_driver";
     } else {
-        lib_path = ModuleDirectory() / "ox_ipc_frontend";
+        lib_path = ModuleDirectory() / "ox_ipc_client";
     }
 
     const std::string lib_str = lib_path.string();
