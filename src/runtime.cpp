@@ -2008,10 +2008,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateSwapchainImages(XrSwapchain swapchain,
 #endif
 #ifdef OX_METAL
         case GraphicsAPI::Metal: {
-            // Allocate space for texture pointers
-            it->second.metalTextures.resize(numImages, nullptr);
-            metal::CreateTextures(it->second.metalCommandQueue, it->second.width, it->second.height, it->second.format,
-                                  numImages, it->second.metalTextures.data());
+            if (it->second.metalTextures.empty()) {
+                it->second.metalTextures.resize(numImages, nullptr);
+                metal::CreateTextures(it->second.metalCommandQueue, it->second.width, it->second.height,
+                                      it->second.format, numImages, it->second.metalTextures.data());
+            }
             break;
         }
 #endif
