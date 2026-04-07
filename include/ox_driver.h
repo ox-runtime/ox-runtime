@@ -41,7 +41,8 @@ typedef struct OxDriver {
     // Optional - Defaults to 1 (i.e. running), if this callback is not provided.
     int (*is_driver_running)(void);
 
-    // Optional configuration setters invoked by the runtime
+    // Optional configuration setters invoked by the runtime.
+    // Key will always be a null-terminated string.
     void (*set_config_bool)(const char* key, XrBool32 value);
     void (*set_config_string)(const char* key, const char* value);
     void (*set_config_int)(const char* key, int64_t value);
