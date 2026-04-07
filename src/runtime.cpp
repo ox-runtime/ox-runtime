@@ -115,7 +115,7 @@ enum class GraphicsAPI { OpenGL, Vulkan, Metal };
 #endif
 
 // Forward declaration so LoadConfiguredDriver can call it
-extern "C" RUNTIME_EXPORT int ox_set_driver(const OxDriverCallbacks* callbacks);
+extern "C" RUNTIME_EXPORT int ox_set_driver(const OxDriver* driver);
 
 namespace {
 
@@ -153,7 +153,7 @@ struct DeviceSnapshot {
     uint32_t count = 0;
 };
 
-std::unique_ptr<OxDriverCallbacks> g_driver;
+std::unique_ptr<OxDriver> g_driver;
 std::unique_ptr<dylib::library> g_driver_library;
 std::queue<QueuedSessionStateEvent> g_session_events;
 std::mutex g_instance_mutex;
@@ -207,7 +207,7 @@ bool LoadConfiguredDriver() {
     if (!env_driver.empty()) {
         lib_path = fs::absolute(env_driver);
     } else if (GetEnvVar("OX_USE_SIMULATOR") == "1") {
-        lib_path = ModuleDirectory() / "drivers/ox-simulator/ox_driver";
+        lib_path = ModuleDirectory() / "drivers/simulator/ox_driver";
     } else {
         lib_path = ModuleDirectory() / "ox_ipc_client";
     }
@@ -215,13 +215,13 @@ bool LoadConfiguredDriver() {
     const std::string lib_str = lib_path.string();
     try {
         auto lib = std::make_unique<dylib::library>(lib_str, dylib::decorations::os_default());
-        auto ox_driver_register = lib->get_function<int(OxDriverCallbacks*)>("ox_driver_register");
-        OxDriverCallbacks callbacks{};
-        if (!ox_driver_register || !ox_driver_register(&callbacks)) {
+        auto ox_driver_register = lib->get_function<int(OxDriver*)>("ox_driver_register");
+        OxDriver driver{};
+        if (!ox_driver_register || !ox_driver_register(&driver)) {
             spdlog::error("Driver registration failed for {}", lib_str);
             return false;
         }
-        if (!ox_set_driver(&callbacks)) {
+        if (!ox_set_driver(&driver)) {
             return false;
         }
         g_driver_library = std::move(lib);
@@ -292,25 +292,24 @@ void NotifyDriverSessionState(XrSessionState state) {
 }  // namespace
 
 extern "C" {
-RUNTIME_EXPORT int ox_set_driver(const OxDriverCallbacks* callbacks) {
-    if (!callbacks) {
+RUNTIME_EXPORT int ox_set_driver(const OxDriver* driver) {
+    if (!driver) {
         UnloadDriver();
         return 1;
     }
 
-    if (!callbacks->initialize || !callbacks->is_device_connected || !callbacks->get_system_properties ||
-        !callbacks->update_view) {
+    if (!driver->initialize || !driver->is_device_connected || !driver->get_system_properties || !driver->update_view) {
         spdlog::error("Driver missing required callbacks");
         return 0;
     }
 
-    if (!callbacks->initialize()) {
+    if (!driver->initialize()) {
         spdlog::error("Driver initialize() failed");
         return 0;
     }
 
     UnloadDriver();
-    g_driver = std::make_unique<OxDriverCallbacks>(*callbacks);
+    g_driver = std::make_unique<OxDriver>(*driver);
     spdlog::info("Installed runtime driver");
     return 1;
 }
@@ -512,13 +511,13 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
         auto value = state->currentState;
         bool available = false;
         if constexpr (std::is_same_v<StateType, XrActionStateBoolean>) {
-            if (!g_driver->get_input_state_boolean) {
+            if (!g_driver->get_input_state_bool) {
                 continue;
             }
 
             XrBool32 boolean_value = value ? XR_TRUE : XR_FALSE;
-            available = g_driver->get_input_state_boolean(predicted_time, user_path.c_str(), component_path.c_str(),
-                                                          &boolean_value) == XR_SUCCESS;
+            available = g_driver->get_input_state_bool(predicted_time, user_path.c_str(), component_path.c_str(),
+                                                       &boolean_value) == XR_SUCCESS;
             value = boolean_value ? XR_TRUE : XR_FALSE;
         } else if constexpr (std::is_same_v<StateType, XrActionStateFloat>) {
             if (!g_driver->get_input_state_float) {
@@ -1340,7 +1339,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
     }
 
     if (!g_driver) {
-        spdlog::error("Driver callbacks not available");
+        spdlog::error("Driver not assigned");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 

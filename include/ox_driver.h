@@ -27,7 +27,7 @@ typedef struct {
 } OxDeviceState;
 
 // Driver callbacks - implement these in your driver
-struct OxDriverCallbacks {
+typedef struct OxDriver {
     // ========== Lifecycle ==========
 
     // Called once when driver is loaded
@@ -40,6 +40,12 @@ struct OxDriverCallbacks {
     // Return: 1 if the driver is still running, 0 to signal the host to unload the driver.
     // Optional - Defaults to 1 (i.e. running), if this callback is not provided.
     int (*is_driver_running)(void);
+
+    // Optional configuration setters invoked by the runtime
+    void (*set_config_bool)(const char* key, XrBool32 value);
+    void (*set_config_string)(const char* key, const char* value);
+    void (*set_config_int)(const char* key, int64_t value);
+    void (*set_config_float)(const char* key, float value);
 
     // ========== Device Discovery ==========
 
@@ -78,8 +84,8 @@ struct OxDriverCallbacks {
     // out_value: write the boolean value here (XR_TRUE or XR_FALSE)
     // Returns: XR_SUCCESS if component exists and value is valid, XR_ERROR_PATH_UNSUPPORTED otherwise
     // This callback is optional - set to NULL if devices are not supported
-    XrResult (*get_input_state_boolean)(XrTime predicted_time, const char* user_path, const char* component_path,
-                                        XrBool32* out_value);
+    XrResult (*get_input_state_bool)(XrTime predicted_time, const char* user_path, const char* component_path,
+                                     XrBool32* out_value);
 
     // Get float input state (for /value, /force components)
     // predicted_time: OpenXR predicted display time
@@ -132,13 +138,13 @@ struct OxDriverCallbacks {
     // The pixel_data pointer remains valid until the next frame submission
     void (*submit_frame_pixels)(XrTime frame_time, uint32_t eye_index, uint32_t width, uint32_t height, uint32_t format,
                                 const void* pixel_data, uint32_t data_size);
-};
+} OxDriver;
 
 // Every driver MUST export this function
 // The runtime calls this to register the driver's callbacks
-// callbacks: pointer to struct that runtime has allocated
+// driver: pointer to struct that runtime has allocated
 // Return: 1 on success, 0 on failure
-typedef int (*OxDriverRegisterFunc)(struct OxDriverCallbacks* callbacks);
+typedef int (*OxDriverRegisterFunc)(OxDriver* driver);
 
 #ifdef __cplusplus
 }

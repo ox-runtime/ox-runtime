@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-extern "C" void ox_set_driver(const OxDriverCallbacks* callbacks);
+extern "C" void ox_set_driver(const OxDriver* driver);
 
 namespace ox {
 namespace test {
@@ -45,21 +45,21 @@ class FakeDriverState {
         device_count = 0;
     }
 
-    OxDriverCallbacks BuildCallbacks() const {
-        OxDriverCallbacks callbacks{};
-        callbacks.initialize = &Initialize;
-        callbacks.shutdown = &Shutdown;
-        callbacks.is_device_connected = &IsDeviceConnected;
-        callbacks.get_system_properties = &GetSystemProperties;
-        callbacks.update_view = &UpdateView;
-        callbacks.update_devices = &UpdateDevices;
-        callbacks.get_input_state_boolean = &GetInputStateBoolean;
-        callbacks.get_input_state_float = &GetInputStateFloat;
-        callbacks.get_input_state_vector2f = &GetInputStateVector2f;
-        callbacks.get_interaction_profiles = &GetInteractionProfiles;
-        callbacks.on_session_state_changed = &OnSessionStateChanged;
-        callbacks.submit_frame_pixels = &SubmitFramePixels;
-        return callbacks;
+    OxDriver BuildCallbacks() const {
+        OxDriver driver{};
+        driver.initialize = &Initialize;
+        driver.shutdown = &Shutdown;
+        driver.is_device_connected = &IsDeviceConnected;
+        driver.get_system_properties = &GetSystemProperties;
+        driver.update_view = &UpdateView;
+        driver.update_devices = &UpdateDevices;
+        driver.get_input_state_bool = &GetInputStateBoolean;
+        driver.get_input_state_float = &GetInputStateFloat;
+        driver.get_input_state_vector2f = &GetInputStateVector2f;
+        driver.get_interaction_profiles = &GetInteractionProfiles;
+        driver.on_session_state_changed = &OnSessionStateChanged;
+        driver.submit_frame_pixels = &SubmitFramePixels;
+        return driver;
     }
 
     struct SubmittedFrame {
@@ -200,8 +200,8 @@ class RuntimeTestBase : public ::testing::Test {
     void SetUp() override {
         driver_state.ResetDefaults();
         FakeDriverState::active = &driver_state;
-        callbacks_ = driver_state.BuildCallbacks();
-        ox_set_driver(&callbacks_);
+        driver_ = driver_state.BuildCallbacks();
+        ox_set_driver(&driver_);
     }
 
     void TearDown() override {
@@ -234,7 +234,7 @@ class RuntimeTestBase : public ::testing::Test {
 
     std::vector<XrInstance> created_instances_;
     FakeDriverState driver_state;
-    OxDriverCallbacks callbacks_{};
+    OxDriver driver_{};
 };
 
 }  // namespace test
