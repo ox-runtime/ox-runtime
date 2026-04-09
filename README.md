@@ -1,14 +1,14 @@
 # ox-runtime
 
-`ox-runtime` is the standalone OpenXR runtime library repo.
+**WORK-IN-PROGRESS** - This is still a prototype and is not (yet) fully compliant with the OpenXR spec.
 
-It owns the runtime implementation, the runtime manifest, and the driver-oriented test seam used by unit tests. Production code loads a driver library; tests inject a mock driver callback table directly.
+This is a runtime implementation of the OpenXR spec.
 
 ## Outputs
 
 Build artifacts are written under `build/<platform>/bin`:
 
-- `ox_runtime.{dll|so|dylib}`
+- `ox_runtime.dll`/`libox_runtime.so`/`libox_runtime.dylib}`
 - `ox_runtime.json`
 
 ## Build
@@ -33,4 +33,4 @@ At runtime, driver loading resolves in this order:
 1. An already injected test driver
 2. `OX_RUNTIME_DRIVER`
 3. `OX_USE_SIMULATOR=1` fallback to the local simulator driver folder
-4. `ox_ipc_client` as the default production path
+4. `ox_ipc_client` as the default path
