@@ -8,7 +8,7 @@ This is a runtime implementation of the OpenXR spec.
 
 Build artifacts are written under `build/<platform>/bin`:
 
-- `ox_runtime.dll`/`libox_runtime.so`/`libox_runtime.dylib}`
+- `ox_runtime.dll`/`libox_runtime.so`/`libox_runtime.dylib`
 - `ox_runtime.json`
 
 ## Build
