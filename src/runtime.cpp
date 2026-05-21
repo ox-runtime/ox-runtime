@@ -384,6 +384,21 @@ std::string PathToStringLocked(XrPath path) {
     auto it = g_path_to_string.find(path);
     return it != g_path_to_string.end() ? it->second : std::string();
 }
+
+XrPath ExtractSubactionPathForBindingLocked(const ActionData& action, const std::string& binding_path) {
+    const size_t input_pos = binding_path.find("/input/");
+    const std::string binding_user_path =
+        input_pos != std::string::npos ? binding_path.substr(0, input_pos) : binding_path;
+
+    for (XrPath candidate : action.subaction_paths) {
+        const std::string candidate_path = PathToStringLocked(candidate);
+        if (!candidate_path.empty() && candidate_path == binding_user_path) {
+            return candidate;
+        }
+    }
+
+    return XR_NULL_PATH;
+}
 }  // namespace
 
 // Safe string copy helper - modern C++17+ replacement for strncpy
@@ -491,6 +506,9 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
         predicted_time = session_it->second.last_predicted_display_time;
     }
 
+    auto resolved_value = state->currentState;
+    bool has_active_source = false;
+
     for (const auto& binding : bindings) {
         if (!IsBindingMatch(binding, getInfo->subactionPath)) {
             continue;
@@ -520,12 +538,19 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
                                                        &boolean_value) == XR_SUCCESS;
             value = boolean_value ? XR_TRUE : XR_FALSE;
         } else if constexpr (std::is_same_v<StateType, XrActionStateFloat>) {
-            if (!g_driver->get_input_state_float) {
-                continue;
+            if (g_driver->get_input_state_float) {
+                available = g_driver->get_input_state_float(predicted_time, user_path.c_str(), component_path.c_str(),
+                                                            &value) == XR_SUCCESS;
             }
 
-            available = g_driver->get_input_state_float(predicted_time, user_path.c_str(), component_path.c_str(),
-                                                        &value) == XR_SUCCESS;
+            if (!available && g_driver->get_input_state_bool) {
+                XrBool32 boolean_value = XR_FALSE;
+                available = g_driver->get_input_state_bool(predicted_time, user_path.c_str(), component_path.c_str(),
+                                                           &boolean_value) == XR_SUCCESS;
+                if (available) {
+                    value = boolean_value ? 1.0f : 0.0f;
+                }
+            }
         } else if constexpr (std::is_same_v<StateType, XrActionStateVector2f>) {
             if (!g_driver->get_input_state_vector2f) {
                 continue;
@@ -538,11 +563,34 @@ inline XrResult GetActionState(XrSession session, const XrActionStateGetInfo* ge
         } else {
             return XR_ERROR_VALIDATION_FAILURE;
         }
+
         if (available) {
-            state->currentState = value;
-            state->isActive = XR_TRUE;
-            return XR_SUCCESS;
+            if (!has_active_source) {
+                resolved_value = value;
+                has_active_source = true;
+                continue;
+            }
+
+            if constexpr (std::is_same_v<StateType, XrActionStateBoolean>) {
+                resolved_value = (resolved_value != XR_FALSE || value != XR_FALSE) ? XR_TRUE : XR_FALSE;
+            } else if constexpr (std::is_same_v<StateType, XrActionStateFloat>) {
+                if (std::fabs(value) > std::fabs(resolved_value)) {
+                    resolved_value = value;
+                }
+            } else if constexpr (std::is_same_v<StateType, XrActionStateVector2f>) {
+                const float candidate_length_sq = value.x * value.x + value.y * value.y;
+                const float resolved_length_sq =
+                    resolved_value.x * resolved_value.x + resolved_value.y * resolved_value.y;
+                if (candidate_length_sq > resolved_length_sq) {
+                    resolved_value = value;
+                }
+            }
         }
+    }
+
+    if (has_active_source) {
+        state->currentState = resolved_value;
+        state->isActive = XR_TRUE;
     }
 
     return XR_SUCCESS;
@@ -1585,20 +1633,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrSuggestInteractionProfileBindings(
             XrPath subaction_path = XR_NULL_PATH;
             auto action_it = g_actions.find(binding.action);
             if (action_it != g_actions.end()) {
-                // For actions with subaction paths, extract from the binding path
                 if (!action_it->second.subaction_paths.empty()) {
                     char binding_path_str[256];
                     uint32_t len = 0;
                     xrPathToString(instance, binding_path, sizeof(binding_path_str), &len, binding_path_str);
-                    std::string path_str(binding_path_str);
-                    // Check if path contains /user/hand/left or /user/hand/right
-                    if (path_str.find("/user/hand/left") != std::string::npos) {
-                        subaction_path = action_it->second.subaction_paths[0];  // Assuming first is left
-                    } else if (path_str.find("/user/hand/right") != std::string::npos) {
-                        subaction_path = action_it->second.subaction_paths.size() > 1
-                                             ? action_it->second.subaction_paths[1]
-                                             : action_it->second.subaction_paths[0];
-                    }
+                    subaction_path = ExtractSubactionPathForBindingLocked(action_it->second, binding_path_str);
                 }
             }
 
