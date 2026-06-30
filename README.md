@@ -1,15 +1,12 @@
 # ox-runtime
 
-**WORK-IN-PROGRESS** - This is still a prototype and is not (yet) fully compliant with the OpenXR spec.
+**ox-runtime** is an implementation of the OpenXR Runtime [specification](https://registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html), built for [ox](https://github.com/ox-runtime/ox).
 
-This is a runtime implementation of the OpenXR spec.
+It implements the logic of an OpenXR runtime (as defined in the spec), and delegates to a [driver implementation](https://github.com/ox-runtime/ox/blob/main/docs/drivers.md) (to talk to the underlying XR hardware).
 
-## Outputs
+> [!WARNING]
+> **WORK-IN-PROGRESS** - This is still heavily under-development and is not (yet) fully compliant with the OpenXR spec.
 
-Build artifacts are written under `build/<platform>/bin`:
-
-- `ox_runtime.dll`/`libox_runtime.so`/`libox_runtime.dylib`
-- `ox_runtime.json`
 
 ## Build
 
@@ -17,6 +14,11 @@ Build artifacts are written under `build/<platform>/bin`:
 cmake -S . -B build/win-x64
 cmake --build build/win-x64 --config Release
 ```
+
+The build artifacts will be written under `build/bin`:
+
+- `ox_runtime.dll`/`libox_runtime.so`/`libox_runtime.dylib`
+- `ox_runtime.json`
 
 ## Test
 
@@ -28,9 +30,15 @@ The runtime tests use injected mock driver bindings. They do not require `ox.exe
 
 ## Runtime Driver Resolution
 
-At runtime, driver loading resolves in this order:
+Driver loading resolves in the following order (at runtime):
 
 1. An already injected test driver
 2. `OX_RUNTIME_DRIVER`
-3. `OX_USE_SIMULATOR=1` fallback to the local simulator driver folder
-4. `ox_ipc_client` as the default path
+3. `OX_USE_SIMULATOR=1` fallback to the [simulator driver](https://github.com/ox-runtime/ox-sim-driver) (installed at `./drivers/simulator`)
+4. [ox_ipc_client](https://github.com/ox-runtime/ox-ipc-proxy) as the default driver (which connects to the `ox` process)
+
+## References
+
+- [OpenXR Specification](https://www.khronos.org/registry/OpenXR/)
+- [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK)
+- [OpenXR Loader Design](https://github.com/KhronosGroup/OpenXR-SDK-Source/blob/main/src/loader/LoaderDesign.md)
