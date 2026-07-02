@@ -11,7 +11,7 @@ It implements the logic of an OpenXR runtime (as defined in the spec), and deleg
 ## Build
 
 ```bash
-cmake -S . -B build
+cmake -B build
 cmake --build build --config Release
 ```
 
