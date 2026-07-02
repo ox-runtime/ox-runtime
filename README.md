@@ -26,7 +26,7 @@ The build artifacts will be written under `build/bin`:
 cmake --build build --target runtime_tests --config Release
 ```
 
-The runtime tests use injected mock driver bindings. They do not require `ox.exe` or `ox_ipc_server`.
+The runtime tests use injected mock driver bindings. They do not require the [ox](https://github.com/ox-runtime/ox) host process or [ipc proxy](https://github.com/ox-runtime/ox-ipc-proxy).
 
 ## Runtime Driver Resolution
 
