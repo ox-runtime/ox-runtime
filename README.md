@@ -32,10 +32,10 @@ The runtime tests use injected mock driver bindings. They do not require the [ox
 
 Driver loading resolves in the following order (at runtime):
 
-1. An already injected test driver
-2. `OX_RUNTIME_DRIVER`
-3. `OX_USE_SIMULATOR=1` fallback to the [simulator driver](https://github.com/ox-runtime/ox-sim-driver) (installed at `./drivers/simulator`)
-4. [ox_ipc_client](https://github.com/ox-runtime/ox-ipc-proxy) as the default driver (which connects to the `ox` process)
+1. An already injected test driver.
+2. The `OX_RUNTIME_DRIVER` environment variable.
+3. `OX_USE_SIMULATOR=1` fallback to the [simulator driver](https://github.com/ox-runtime/ox-sim-driver) (installed at `./drivers/simulator`).
+4. [ox_ipc_client](https://github.com/ox-runtime/ox-ipc-proxy) as the default driver (which connects to the `ox` process).
 
 ## References
 
