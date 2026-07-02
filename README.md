@@ -11,8 +11,8 @@ It implements the logic of an OpenXR runtime (as defined in the spec), and deleg
 ## Build
 
 ```bash
-cmake -S . -B build/win-x64
-cmake --build build/win-x64 --config Release
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
 The build artifacts will be written under `build/bin`:
@@ -23,7 +23,7 @@ The build artifacts will be written under `build/bin`:
 ## Test
 
 ```bash
-cmake --build build/win-x64 --target runtime_tests --config Release
+cmake --build build --target runtime_tests --config Release
 ```
 
 The runtime tests use injected mock driver bindings. They do not require `ox.exe` or `ox_ipc_server`.
