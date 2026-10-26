@@ -678,9 +678,19 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateInstance(const XrInstanceCreateInfo* crea
     }
 
     std::lock_guard<std::mutex> lock(g_instance_mutex);
-    if (!g_driver) {
+    if (!g_driver && !LoadConfiguredDriver()) {
         spdlog::error("Failed to load runtime driver");
         return XR_ERROR_RUNTIME_FAILURE;
+    }
+
+    /* The driver connection is released when the last instance is destroyed (see
+     * xrDestroyInstance). Re-establish it here so an application can create a new instance in the
+     * same process after a previous one was destroyed. */
+    if (g_driver->is_device_connected && g_driver->is_device_connected() == 0) {
+        if (!g_driver->initialize || g_driver->initialize() == 0) {
+            spdlog::error("Failed to initialize runtime driver");
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
     }
 
     XrInstance newInstance = AllocateRuntimeHandle<XrInstance>();
@@ -706,6 +716,13 @@ XRAPI_ATTR XrResult XRAPI_CALL xrDestroyInstance(XrInstance instance) {
     if (g_instances.empty()) {
         while (!g_session_events.empty()) {
             g_session_events.pop();
+        }
+        /* Release the connection/device held by the driver as soon as the last instance is gone.
+         * Otherwise the connection is kept alive for the whole process lifetime, which prevents
+         * another application process from connecting to the runtime. The driver library itself is
+         * intentionally kept loaded so it can be re-initialized for a later instance. */
+        if (g_driver && g_driver->shutdown) {
+            g_driver->shutdown();
         }
     }
 

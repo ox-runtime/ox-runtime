@@ -67,6 +67,47 @@ TEST_F(RuntimeTestBase, DestroyInstance_NullHandle_ReturnsError) {
     EXPECT_EQ(result, XR_ERROR_HANDLE_INVALID);
 }
 
+TEST_F(RuntimeTestBase, DestroyInstance_LastInstance_DisconnectsDriver) {
+    XrInstance instance = CreateBasicInstance();
+    ASSERT_NE(instance, XR_NULL_HANDLE);
+
+    ASSERT_EQ(driver_state.shutdown_count, 0);
+    EXPECT_EQ(xrDestroyInstance(instance), XR_SUCCESS);
+    created_instances_.erase(std::remove(created_instances_.begin(), created_instances_.end(), instance),
+                             created_instances_.end());
+
+    EXPECT_EQ(driver_state.shutdown_count, 1);
+    EXPECT_FALSE(driver_state.connected);
+}
+
+TEST_F(RuntimeTestBase, DestroyInstance_OneOfManyInstances_KeepsDriverConnected) {
+    XrInstance first = CreateBasicInstance("First");
+    XrInstance second = CreateBasicInstance("Second");
+    ASSERT_NE(first, XR_NULL_HANDLE);
+    ASSERT_NE(second, XR_NULL_HANDLE);
+
+    EXPECT_EQ(xrDestroyInstance(first), XR_SUCCESS);
+    created_instances_.erase(std::remove(created_instances_.begin(), created_instances_.end(), first),
+                             created_instances_.end());
+
+    EXPECT_EQ(driver_state.shutdown_count, 0);
+    EXPECT_TRUE(driver_state.connected);
+}
+
+TEST_F(RuntimeTestBase, CreateInstance_AfterLastInstanceDestroyed_ReconnectsDriver) {
+    XrInstance first = CreateBasicInstance();
+    ASSERT_NE(first, XR_NULL_HANDLE);
+    ASSERT_EQ(xrDestroyInstance(first), XR_SUCCESS);
+    created_instances_.erase(std::remove(created_instances_.begin(), created_instances_.end(), first),
+                             created_instances_.end());
+    ASSERT_FALSE(driver_state.connected);
+
+    XrInstance second = CreateBasicInstance();
+    EXPECT_NE(second, XR_NULL_HANDLE);
+    EXPECT_TRUE(driver_state.connected);
+    EXPECT_EQ(driver_state.initialize_count, 2);
+}
+
 TEST_F(RuntimeTestBase, GetInstanceProperties_ValidInstance_ReturnsSuccess) {
     XrInstance instance = CreateBasicInstance();
     ASSERT_NE(instance, XR_NULL_HANDLE);

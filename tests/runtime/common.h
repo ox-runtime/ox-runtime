@@ -29,6 +29,8 @@ class FakeDriverState {
         vector2_inputs.clear();
         submitted_frames.clear();
         last_session_state = XR_SESSION_STATE_UNKNOWN;
+        initialize_count = 0;
+        shutdown_count = 0;
 
         std::memset(&system_properties, 0, sizeof(system_properties));
         system_properties.type = XR_TYPE_SYSTEM_PROPERTIES;
@@ -81,6 +83,8 @@ class FakeDriverState {
     std::unordered_map<std::string, XrVector2f> vector2_inputs;
     std::vector<SubmittedFrame> submitted_frames;
     XrSessionState last_session_state = XR_SESSION_STATE_UNKNOWN;
+    int initialize_count = 0;
+    int shutdown_count = 0;
 
     static inline FakeDriverState* active = nullptr;
 
@@ -89,8 +93,20 @@ class FakeDriverState {
         return std::string(user_path ? user_path : "") + "|" + std::string(component_path ? component_path : "");
     }
 
-    static int Initialize() { return active && active->connected ? 1 : 0; }
-    static void Shutdown() {}
+    static int Initialize() {
+        if (!active) {
+            return 0;
+        }
+        active->initialize_count++;
+        active->connected = true;
+        return 1;
+    }
+    static void Shutdown() {
+        if (active) {
+            active->shutdown_count++;
+            active->connected = false;
+        }
+    }
     static int IsDeviceConnected() { return active && active->connected ? 1 : 0; }
 
     static void GetSystemProperties(XrSystemProperties* props) {
